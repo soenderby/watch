@@ -1,0 +1,7 @@
+# Binary (root only)
+/watch
+
+# Go
+*.exe
+*.test
+*.out
