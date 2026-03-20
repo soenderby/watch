@@ -6,102 +6,210 @@ See `docs/tui-design.md` for the view layer that consumes these abstractions.
 
 ## Design Principles
 
-1. **Data flows in one direction.** Raw sources → builder → snapshot → diff → events → store → views. No component reaches back into a previous layer.
-2. **The TUI is a thin view.** It sees Snapshot and EventStore. It never calls tmux or reads artifacts directly.
-3. **Extensibility through optional fields.** New session types, enrichment sources, and event types are added as new fields or string values. Existing code does not break.
-4. **Single source of truth.** Sessions exist once in the snapshot. Projects reference them, not copy them.
-5. **Testable without a terminal.** Every abstraction can be tested with unit tests and CLI tools. No bubbletea dependency outside the TUI package.
+1. **Agent-centric, not session-centric.** The fundamental unit is the agent — a persistent identity that spans sessions. Tmux sessions are instances of agents, not first-class entities.
+2. **Data flows in one direction.** Raw sources → builder → snapshot → diff → events → store → views. No component reaches back into a previous layer.
+3. **The TUI is a thin view.** It sees Snapshot and EventStore. It never calls tmux or reads artifacts directly.
+4. **Extensibility through optional fields.** New agent types, enrichment sources, and event types are added as new fields or string values. Existing code does not break.
+5. **Single source of truth.** Agents exist once in the snapshot. Instances reference them, not copy them.
+6. **Testable without a terminal.** Every abstraction can be tested with unit tests and CLI tools. No bubbletea dependency outside the TUI package.
+7. **Only agents are visible.** Tmux sessions not associated with a registered agent identity are ignored entirely. Watch monitors agents, not tmux.
 
 ## Package Structure
 
 ```
 internal/
-  model/          Snapshot, Session, Project, Run, Event types (no dependencies)
-  snapshot/       SnapshotBuilder — assembles Snapshot from raw sources
-  events/         Diff function + EventStore
-  poller/         Poller — periodic snapshot + event production
-  tmux/           tmux session discovery and interaction (exists)
-  orca/           orca artifact reading (exists)
-  config/         project registry (exists)
+  identity/       Agent identity registry (planned for extraction to lore)
+  model/           Snapshot, Agent, Instance, Run, Event types (no dependencies)
+  snapshot/        SnapshotBuilder — assembles Snapshot from raw sources
+  events/          Diff function + EventStore
+  poller/          Poller — periodic snapshot + event production
+  tmux/            tmux session discovery and interaction (exists)
+  orca/            orca artifact reading (exists)
+  config/          project registry (exists)
 ```
 
-`model` has no dependencies on any other package. Every other package depends on `model`. The dependency graph is acyclic:
+`model` has no dependencies on any other package. `identity` has no dependencies on any other internal package. Every other package depends on `model`. The dependency graph is acyclic:
 
 ```
-model
-  ↑
-  ├── snapshot (depends on: model, tmux, orca, config)
+model       identity
+  ↑            ↑
+  ├── snapshot (depends on: model, identity, tmux, orca, config)
   ├── events   (depends on: model)
-  ├── poller   (depends on: model, snapshot, events, config)
-  └── TUI/CLI  (depends on: model, poller, events)
+  ├── poller   (depends on: model, identity, snapshot, events, config)
+  └── TUI/CLI  (depends on: model, identity, poller, events)
 ```
 
 ---
 
-## 1. Data Model (`internal/model`)
+## 1. Agent Identity (`internal/identity`)
+
+This package defines agent identities and the registry that stores them. It is designed for future extraction into lore when that tool is built. Watch consumes identities read-only — it never writes to the registry.
+
+### AgentIdentity
+
+An agent identity is a persistent definition. It describes who an agent is, not what it is currently doing.
+
+```
+AgentIdentity
+  Name           string       unique identifier (e.g., "orca-worker", "librarian", "reviewer")
+  Project        string       optional project association, empty for global agents
+  PrimingRef     string       optional path/reference to priming context (AGENTS.md, prompt file)
+  Description    string       short human-readable description
+```
+
+Name is the primary key. It must be unique across the registry (global + project-local combined).
+
+Project is optional. When set, it associates the agent with a registered project. When empty, the agent is global — it can be used in any context.
+
+PrimingRef is a pointer to the agent's priming context, not the context itself. Watch does not interpret priming — it just knows the reference exists. Lore will eventually own priming interpretation.
+
+### Registry
+
+The registry is the authoritative list of known agent identities. It merges two sources:
+
+1. **Global registry** — `~/.config/watch/agents.json`. Operator-managed. Contains all agent definitions, both global and project-associated.
+
+2. **Project-local definitions** — an optional `agents.json` file in a registered project's repo root. Contains agents specific to that project. Merged with the global registry on load.
+
+When both sources define an agent with the same name, the global registry takes precedence (the operator's definition wins over the project default).
+
+```
+Registry
+  agents         []AgentIdentity
+
+  All() []AgentIdentity
+  ByName(name string) *AgentIdentity
+  ForProject(name string) []AgentIdentity
+  Global() []AgentIdentity               agents with no project association
+```
+
+### Registry File Format
+
+Global registry (`~/.config/watch/agents.json`):
+
+```json
+{
+  "agents": [
+    {
+      "name": "orca-worker",
+      "project": "orca",
+      "description": "Batch execution worker"
+    },
+    {
+      "name": "librarian",
+      "project": "ai-resources",
+      "priming_ref": "AGENTS.md",
+      "description": "Knowledge management agent"
+    },
+    {
+      "name": "reviewer",
+      "description": "Careful code reviewer, any project"
+    }
+  ]
+}
+```
+
+Project-local (`<project-root>/agents.json`):
+
+```json
+{
+  "agents": [
+    {
+      "name": "orca-worker",
+      "description": "Batch execution worker for this project"
+    }
+  ]
+}
+```
+
+Project-local agents automatically have their project field set to the project they were discovered in. The name must still be globally unique.
+
+### Extraction Plan
+
+This package is designed for future extraction into lore. When lore is built:
+
+1. Lore absorbs the identity package, extending it with memory, learning, and context management.
+2. Watch continues to read agent identities, now from lore's registry instead of its own.
+3. The AgentIdentity type may grow new fields (lore-managed), but existing fields remain stable.
+4. Watch's dependency on the identity interface does not change — only the backing implementation moves.
+
+---
+
+## 2. Data Model (`internal/model`)
 
 ### Snapshot
 
-The top-level point-in-time state of everything.
+The top-level point-in-time state of everything watch knows about.
 
 ```
 Snapshot
-  Timestamp      time.Time       when this snapshot was taken
-  Sessions       []*Session      all sessions, each appears exactly once
-  Projects       []*Project      orca projects, each references sessions
+  Timestamp      time.Time
+  Agents         []*Agent         all agents with at least one active instance
+  Projects       []*Project       orca projects from registered config
 ```
+
+A snapshot only contains agents that have active instances (live tmux sessions). Registered agents with no active instances do not appear. The snapshot is operational state, not a registry dump.
 
 Methods:
-- `StandaloneSessions() []*Session` — sessions not claimed by any project (Type != "orca")
-- `ProjectByName(name string) *Project` — find a project by name, nil if not found
-- `SessionByName(name string) *Session` — find a session by tmux name, nil if not found
+- `AgentByName(name string) *Agent` — find an agent by identity name
+- `AgentsForProject(project string) []*Agent` — agents associated with a project
 
-### Session
+### Agent
 
-One tmux session, enriched with type-specific data.
+An agent as observed at snapshot time. Combines identity (who it is) with operational state (what it is doing).
 
 ```
-Session
-  Name           string          tmux session name (unique within a snapshot)
-  Type           string          "orca" or "standalone" (extensible)
-  Tmux           TmuxState       raw tmux data, always present
-  Orca           *OrcaAgent      orca enrichment, nil for non-orca sessions
+Agent
+  Identity       AgentIdentity    from the registry
+  Instances      []*Instance      currently active tmux sessions, ordered by most recently active
+  State          string           derived aggregate state (see below)
 ```
 
-Type is a string, not a Go enum. New session types (e.g., "lore", "ci") can be added without modifying existing code. Type-specific enrichment is an optional pointer field — nil means not applicable. New enrichment types are added as new pointer fields on Session. Existing code that does not reference the new fields is unaffected.
+State is derived from the agent's instances:
+
+| Instances | Condition | → Agent State |
+|---|---|---|
+| all idle | — | "idle" |
+| any running | — | "running" |
+| all done, none running | — | "done" |
+| any failed, none running | — | "failed" |
+| any blocked, none running | — | "blocked" |
+| none | — | (agent not in snapshot) |
+
+### Instance
+
+One tmux session associated with an agent. An instance is the operational unit — it has a tmux session, and optionally orca enrichment.
+
+```
+Instance
+  SessionName    string           tmux session name (unique within a snapshot)
+  Tmux           TmuxState        raw tmux data
+  State          string           instance-level state (see below)
+  Orca           *OrcaRunState    orca enrichment, nil for non-orca instances
+```
 
 ### TmuxState
 
-Raw tmux data for a session. Not interpreted — the view layer decides what "idle" or "active" means.
+Raw tmux data for a session. Not interpreted by the model.
 
 ```
 TmuxState
-  Windows        int             window count
-  Created        time.Time       session creation time
-  Attached       bool            whether a client is attached
-  Activity       time.Time       last activity timestamp
+  Windows        int
+  Created        time.Time
+  Attached       bool
+  Activity       time.Time        last activity timestamp
 ```
 
-### OrcaAgent
+### Instance State
 
-Orca-specific enrichment for an agent session.
+Instance state is derived differently for orca and non-orca instances.
 
-```
-OrcaAgent
-  ProjectName    string          registered project this belongs to
-  AgentName      string          e.g., "agent-1"
-  SessionID      string          orca session ID from artifact directory
-  State          string          derived state (see below)
-  CurrentRun     *Run            latest/active run, nil if no runs found
-  Runs           []Run           all runs, newest first
-```
-
-**State derivation.** State is computed by the snapshot builder, not stored in any artifact. The rules:
+For orca instances (Orca field is non-nil):
 
 | tmux alive | latest run has summary | summary result | → State |
 |---|---|---|---|
 | yes | no | — | "running" |
-| yes | yes, result != failed/blocked | — | "running" (between runs) |
+| yes | yes, result != failed/blocked | — | "running" |
 | yes | yes, result = failed | — | "failed" |
 | yes | yes, result = blocked | — | "blocked" |
 | no | yes, result = completed | — | "done" |
@@ -109,65 +217,84 @@ OrcaAgent
 | no | yes, result = blocked | — | "blocked" |
 | no | no | — | "idle" |
 
+For non-orca instances:
+
+| tmux alive | recent activity | → State |
+|---|---|---|
+| yes | within threshold | "active" |
+| yes | beyond threshold | "idle" |
+| no | — | "done" |
+
+### OrcaRunState
+
+Orca-specific enrichment for an instance.
+
+```
+OrcaRunState
+  AgentName      string           e.g., "agent-1" (orca slot name)
+  SessionID      string           orca session ID from artifact directory
+  CurrentRun     *Run             latest/active run, nil if no runs found
+  Runs           []Run            all runs, newest first
+```
+
 ### Run
 
-One agent run within a session.
+One agent run within an orca session.
 
 ```
 Run
-  RunID          string          e.g., "0001-20260320T091356748983159Z"
-  Result         string          "completed" | "blocked" | "no_work" | "failed" | ""
-  IssueID        string          from summary.json, empty if not claimed
-  Merged         bool            from summary.json
-  Duration       time.Duration   from metrics or computed from timestamps
-  Tokens         int             token count, 0 if unavailable
-  HasSummary     bool            whether summary.json existed and was parseable
-  Notes          string          from summary.json notes field
-  LogPath        string          absolute path to run.log
-  SummaryPath    string          absolute path to summary.json
+  RunID          string           e.g., "0001-20260320T091356748983159Z"
+  Result         string           "completed" | "blocked" | "no_work" | "failed" | ""
+  IssueID        string           from summary.json, empty if not claimed
+  Merged         bool
+  Duration       time.Duration
+  Tokens         int              0 if unavailable
+  HasSummary     bool
+  Notes          string           from summary.json
+  LogPath        string           absolute path to run.log
+  SummaryPath    string           absolute path to summary.json
 ```
-
-Issue titles are not included. The summary.json contains issue IDs only. Title resolution (via `br show`) is a future enhancement. The field can be added to Run without structural changes when needed.
 
 ### Project
 
-A registered orca project with references to its agent sessions.
+A registered project. Holds queue state. Does not own agents — agents reference projects through their identity.
 
 ```
 Project
-  Name           string          from config
-  Path           string          filesystem path to the repo
-  Queue          QueueState      queue summary
-  Agents         []*Session      references to sessions in the snapshot
+  Name           string           from config
+  Path           string           filesystem path
+  Queue          QueueState
 ```
-
-Agents is a slice of pointers into the snapshot's Sessions slice. Not copies. Ordered by most recently active (most recent first).
 
 ### QueueState
 
-Summary of a project's br queue.
-
 ```
 QueueState
-  Ready          int             issues ready to be worked
-  InProgress     int             issues currently in progress
-  Available      bool            whether queue state could be read
+  Ready          int
+  InProgress     int
+  Available      bool             false when queue state could not be read
 ```
 
-The Available field distinguishes "zero ready issues" from "could not read the queue." When br is not installed or the project has no .beads directory, Available is false and the counts are zero.
+### Extensibility
+
+- **New agent types:** Enrichment for new agent types (e.g., lore agents) is added as new optional pointer fields on Instance, alongside Orca. Existing code that does not reference the new field is unaffected.
+- **New identity fields:** AgentIdentity gains new fields when lore extends it. Watch ignores fields it does not use.
+- **New event types:** Event.Type is a string. New values are added without changing existing code.
+- **Richer agent state:** If new states emerge (e.g., "waiting", "queued"), they are added to the state derivation logic. The string type does not constrain the values.
 
 ---
 
-## 2. Snapshot Builder (`internal/snapshot`)
+## 3. Snapshot Builder (`internal/snapshot`)
 
 Assembles a Snapshot from raw data sources.
 
 ### Inputs
 
-1. `tmux.ListSessions()` — raw tmux session list
-2. `config.Config` — registered projects with paths
-3. `orca.FindSessions()` — artifact data per project path
-4. Queue state per project (via `br` commands)
+1. `identity.Registry` — registered agent identities
+2. `tmux.ListSessions()` — raw tmux session list
+3. `config.Config` — registered projects with paths
+4. `orca.FindSessions()` — artifact data per project path
+5. Queue state per project (via `br` commands)
 
 ### Interface
 
@@ -176,57 +303,64 @@ Builder
   Build() → (*model.Snapshot, error)
 ```
 
-The builder reads all inputs on each call. It does not cache. Caching is the poller's concern.
+The builder reads all inputs on each call. It does not cache.
 
 ### Assembly Logic
 
 ```
-1. Read tmux sessions. Create a *Session for each, Type = "standalone".
-
-2. For each registered project:
+1. Load agent identity registry (global + project-local).
+2. Read all tmux sessions.
+3. For each registered project:
    a. Scan its agent-logs directory for session artifact data.
-   b. For each tmux session, check if its name matches the orca naming convention
-      AND if the project has artifact data for a matching session ID.
-   c. For matching sessions:
-      - Set Type = "orca"
-      - Populate Orca field (agent name, session ID, runs, current run)
-      - Derive State from tmux liveness + latest run summary
-   d. Create the Project with references to matched sessions.
-   e. Read queue state (ready/in_progress counts).
-   f. Order agents by most recent activity.
+   b. Read queue state. Create Project in snapshot.
 
-3. Sessions not claimed by any project remain Type = "standalone".
+4. Match tmux sessions to agent identities:
+   a. Orca matching: for each tmux session matching the orca naming convention
+      (<prefix>-<index>-<timestamp>), find the registered agent identity
+      associated with that project. Create an Instance with orca enrichment.
+   b. Non-orca matching: for each tmux session whose working directory
+      matches a registered project path, find the agent identity associated
+      with that project. Create an Instance without orca enrichment.
+   c. Unmatched sessions are ignored. They do not appear in the snapshot.
 
-4. Return Snapshot with current timestamp.
+5. For each agent identity that has at least one matched instance:
+   a. Create Agent with identity + instances.
+   b. Derive agent state from instance states.
+   c. Order instances by most recently active.
+
+6. Agents with no matched instances are not included in the snapshot.
+
+7. Return Snapshot with current timestamp.
 ```
 
-### Matching Logic
+### Matching Details
 
-Orca tmux sessions follow the naming convention `<prefix>-<index>-<timestamp>` (e.g., `orca-agent-1-20260320T091355Z`). Artifact session directories are named `<agent-name>-<timestamp>` (e.g., `agent-1-20260320T091355Z`).
+**Orca matching.** Orca tmux sessions follow the naming convention `<prefix>-<index>-<timestamp>`. The prefix is typically `orca-agent`. The builder checks each registered project for orca artifacts. When a tmux session name matches the convention and the project has artifact data for a matching session ID, the session becomes an orca instance of that project's agent.
 
-Matching: a tmux session name matches a project's artifact session when the tmux name (after stripping the prefix) ends with the artifact session ID, or the artifact session ID is contained within the tmux name.
+**Non-orca matching.** tmux provides a session's working directory. If a session's working directory is within a registered project's path, and that project has a non-orca agent identity registered, the session becomes an instance of that agent. This is the initial matching mechanism for interactive agents.
 
-A tmux session can match at most one project. If multiple projects could claim the same session (unlikely but possible with overlapping prefixes), the first match wins. This is a known simplification.
+**Global agents.** Agents with no project association cannot be automatically matched to tmux sessions in the initial implementation. Automatic matching for global agents is deferred. They can be manually associated in the future.
 
 ### Error Handling
 
-The builder is tolerant. If tmux is unavailable, it returns an empty session list. If a project's artifact directory is unreadable, that project gets an empty agent list. If queue state cannot be read, QueueState.Available is false. The builder never fails entirely — it returns the best snapshot it can assemble.
+The builder is tolerant. If tmux is unavailable, it returns an empty snapshot. If a project's artifacts are unreadable, that project's agents get no orca enrichment. If queue state cannot be read, QueueState.Available is false. The builder never fails entirely.
 
 ### Tests
 
-- Basic: tmux sessions + one project with artifacts → correct snapshot
-- Matching: tmux session name correctly matched to artifact session ID
-- No match: tmux session with orca-like name but no matching artifacts → standalone
-- Missing artifacts: project registered but no agent-logs directory → project with empty agents
-- State derivation: all combinations from the state table
-- Multiple projects: sessions correctly assigned to their projects
-- No tmux: builder returns snapshot with empty sessions
-- Queue unavailable: QueueState.Available = false, counts = 0
-- Agent ordering: most recently active agent first in project
+- Orca matching: tmux session correctly matched to project agent via naming convention
+- Non-orca matching: tmux session matched to project agent via working directory
+- Unmatched sessions: tmux sessions not matching any agent are excluded
+- No instances: registered agent with no active tmux sessions is excluded from snapshot
+- Multiple instances: agent with multiple tmux sessions gets all of them
+- State derivation: all combinations from the state tables
+- Missing artifacts: project registered but no agent-logs → agent with non-orca instances only
+- Queue unavailable: QueueState.Available = false
+- Instance ordering: most recently active first
+- Multiple projects: sessions correctly assigned to their projects' agents
 
 ---
 
-## 3. Snapshot Diffing and Event Derivation (`internal/events`)
+## 4. Snapshot Diffing and Event Derivation (`internal/events`)
 
 Pure function that compares two snapshots and produces events.
 
@@ -234,25 +368,27 @@ Pure function that compares two snapshots and produces events.
 
 ```
 Event
-  Timestamp      time.Time       when the event was detected
-  Type           string          event type (see below)
-  SessionName    string          tmux session name
-  ProjectName    string          empty for standalone sessions
-  AgentName      string          empty for standalone sessions
-  RunID          string          empty for session-level events
-  IssueID        string          empty when not applicable
-  Result         string          empty for non-completion events
+  Timestamp      time.Time
+  Type           string           event type (see below)
+  AgentName      string           agent identity name
+  ProjectName    string           agent's project, empty for global agents
+  SessionName    string           tmux session name (instance identifier)
+  RunID          string           empty for non-run events
+  IssueID        string           empty when not applicable
+  Result         string           empty for non-completion events
   Merged         bool
 ```
 
-Event Type is a string for extensibility. Initial values:
+Events are always associated with an agent. Since unmatched sessions are invisible, every event has an AgentName.
+
+Event types:
 
 | Type | Meaning |
 |---|---|
-| `session_up` | tmux session appeared |
-| `session_down` | tmux session disappeared |
-| `run_started` | new run directory detected for an orca agent |
-| `run_completed` | run gained a summary (or summary changed) |
+| `instance_up` | new instance appeared for an agent |
+| `instance_down` | instance disappeared for an agent |
+| `run_started` | new orca run detected |
+| `run_completed` | orca run gained a summary |
 
 ### Diff Function
 
@@ -263,108 +399,95 @@ Diff(prev, curr *model.Snapshot) → []Event
 Logic:
 
 ```
-1. Index prev sessions by name.
-2. Index curr sessions by name.
+1. Index prev instances by session name.
+2. Index curr instances by session name.
 
-3. For each session in curr not in prev:
-   → emit session_up event
+3. For each instance in curr not in prev:
+   → emit instance_up
 
-4. For each session in prev not in curr:
-   → emit session_down event
+4. For each instance in prev not in curr:
+   → emit instance_down
 
-5. For each orca session present in both:
-   a. Compare run counts. If curr has more runs than prev:
-      → emit run_started for each new run
-   b. For each run present in both, if curr has a summary that prev did not:
-      → emit run_completed with result, issue, merged from summary
+5. For each orca instance present in both:
+   a. If curr has more runs than prev → emit run_started for each new run
+   b. If a run gained a summary → emit run_completed with result, issue, merged
 
-6. All emitted events use curr.Timestamp as their timestamp.
+6. All events use curr.Timestamp.
 
-7. Return events sorted by type priority: session_up, run_started, run_completed, session_down.
+7. Return events sorted by type priority: instance_up, run_started, run_completed, instance_down.
 ```
 
 ### First Snapshot
 
-When prev is nil (first poll), the diff function treats it as an empty snapshot. All current sessions generate `session_up` events. This bootstraps the event history so that the operator sees the initial state as events.
+When prev is nil, all current instances generate `instance_up` events.
 
 ### Tests
 
-- Session appears → session_up
-- Session disappears → session_down
-- New orca run (run directory exists, no summary yet) → run_started
-- Run gains summary → run_completed with correct fields
-- No change → empty event list
-- Multiple events in one diff (two agents finish simultaneously)
-- First snapshot (nil prev) → session_up for all sessions
-- Standalone session appears → event with empty project/agent fields
-- Orca session disappears → session_down with project/agent fields populated
+- Instance appears → instance_up
+- Instance disappears → instance_down
+- New orca run → run_started
+- Run gains summary → run_completed
+- No change → empty events
+- Multiple events in one diff
+- First snapshot (nil prev) → instance_up for all
+- Events carry correct agent and project names
 
 ---
 
-## 4. Event Store (`internal/events`)
+## 5. Event Store (`internal/events`)
 
-Accumulates events over time. Queryable by project. Capped to prevent unbounded memory growth.
+Accumulates events over time. Queryable by agent. Capped per agent.
 
 ### Interface
 
 ```
 EventStore
-  cap            int             max events per scope
+  cap            int              max events per agent
 
   Add(events []Event)
-    Appends each event to its project scope (keyed by ProjectName,
-    empty string for standalone). Trims oldest events when cap is exceeded.
+    Appends each event to its agent's scope. Trims oldest when cap exceeded.
 
-  ForProject(name string) []Event
-    Returns events for the named project, newest first.
-
-  Standalone() []Event
-    Returns events for standalone sessions (ProjectName = ""), newest first.
+  ForAgent(name string) []Event
+    Returns events for the named agent, newest first.
 
   All() []Event
-    Returns all events across all scopes, merged and sorted newest first.
+    Returns all events across all agents, merged and sorted newest first.
 
   Clear()
-    Removes all events. Used when config changes invalidate event history.
+    Removes all events.
 ```
 
 ### Scoping
 
-Events are stored in a map keyed by project name. Standalone session events use the empty string as their key. This ensures that:
-- Events from different projects never appear mixed when querying by project.
-- A busy project's events do not push out a quiet project's events.
-- Each project independently respects the cap.
+Events are stored in a map keyed by agent name. Each agent independently respects the cap. A busy agent's events do not push out a quiet agent's events.
 
 ### Tests
 
-- Add events, query by project — correct scoping
-- Cap enforcement — oldest events dropped when cap exceeded
-- Events from different projects do not interfere
-- Standalone events stored under empty string key
+- Add events, query by agent — correct scoping
+- Cap enforcement — oldest events dropped
+- Events from different agents do not interfere
 - All() returns merged and sorted results
-- ForProject on unknown name returns empty slice
-- Clear removes everything
+- ForAgent on unknown name returns empty slice
 
 ---
 
-## 5. Poller (`internal/poller`)
+## 6. Poller (`internal/poller`)
 
-Periodically produces snapshots and derives events. This is the engine that drives the TUI's data.
+Periodically produces snapshots and derives events.
 
 ### Interface
 
 ```
 Poller
-  interval       time.Duration   poll interval
-  configPath     string          path to watch config file
+  interval       time.Duration
+  configPath     string
   store          *events.EventStore
-  builder        snapshot.Builder
-  prev           *model.Snapshot  previous snapshot for diffing
+  prev           *model.Snapshot
 
   Poll() → (snapshot *model.Snapshot, newEvents []Event, err error)
-    1. Reload config (picks up newly added/removed projects)
+    1. Reload config and agent identity registry
     2. Call builder.Build() to assemble current snapshot
-    3. If prev is not nil, call events.Diff(prev, curr) to derive events
+    3. If prev is not nil, call events.Diff(prev, curr)
     4. Add new events to store
     5. Set prev = curr
     6. Return snapshot and new events
@@ -372,63 +495,51 @@ Poller
 
 ### bubbletea Integration
 
-When used in the TUI, the poller is invoked via a `tea.Cmd` that sleeps for the poll interval, then calls `Poll()` and returns the result as a `tea.Msg`. The TUI model receives this message and updates its view state.
-
-The poller itself has no dependency on bubbletea. The integration is a thin adapter in the TUI package.
+The poller is invoked via a `tea.Cmd` that sleeps for the interval, calls `Poll()`, and returns the result as a `tea.Msg`. The poller itself has no bubbletea dependency.
 
 ### Standalone Use
 
-The poller can be used without the TUI:
-
-```
-for {
-    snap, events, err := poller.Poll()
-    // print snapshot summary, log events, etc.
-    time.Sleep(interval)
-}
-```
-
-This is useful for testing and for the CLI commands (`watch list`, `watch status`) which do a single poll without entering the TUI.
+The poller can be used without the TUI for testing and for CLI commands (`watch list`, `watch status`) which do a single poll.
 
 ### Error Handling
 
-The poller does not fail on transient errors. If tmux is unavailable or a project's artifacts are unreadable, the builder returns a partial snapshot and the poller works with what it has. Errors are logged, not propagated as fatal.
+The poller does not fail on transient errors. Partial snapshots are returned when some data sources are unavailable.
 
 ### Tests
 
-- First poll: returns snapshot, no events (or session_up events for existing sessions)
-- Second poll with no changes: returns snapshot, empty events
-- Second poll with changes: returns snapshot with correct events
-- Config change between polls: new project picked up, removed project no longer scanned
-- tmux unavailable: partial snapshot with empty sessions, no crash
-- Artifact directory unreadable: partial snapshot, project has empty agents
+- First poll: snapshot with instance_up events
+- Subsequent poll with no changes: empty events
+- Subsequent poll with changes: correct events
+- Config change between polls: new project picked up
+- tmux unavailable: empty snapshot, no crash
+- Artifact errors: partial snapshot
 
 ---
 
 ## Composition
 
 ```
-config.Load() ─────────────┐
-                            │
-tmux.ListSessions() ────────┼──→ snapshot.Builder.Build() ──→ model.Snapshot
-                            │                                      │
-orca.FindSessions() ────────┘                                      │
-                                                                   │
-                                       ┌───────────────────────────┘
-                                       │
-                                 events.Diff(prev, curr) ──→ []model.Event
-                                                                   │
-                                                                   ▼
-                                                          events.EventStore.Add()
-                                                                   │
-                                                                   ▼
-                                                    EventStore.ForProject() / .All()
-                                                                   │
-                                                                   ▼
-                                                              TUI views
+identity.Registry ──────────┐
+                             │
+config.Load() ───────────────┤
+                             │
+tmux.ListSessions() ─────────┼──→ snapshot.Builder.Build() ──→ model.Snapshot
+                             │                                      │
+orca.FindSessions() ─────────┘                                      │
+                                                                    │
+                                        ┌───────────────────────────┘
+                                        │
+                                  events.Diff(prev, curr) ──→ []model.Event
+                                                                    │
+                                                                    ▼
+                                                        events.EventStore.Add()
+                                                                    │
+                                                                    ▼
+                                                      EventStore.ForAgent() / .All()
+                                                                    │
+                                                                    ▼
+                                                                TUI views
 ```
-
-The TUI receives a Snapshot and queries the EventStore. It does not know how snapshots are built, how events are derived, or how tmux is queried. If any upstream component changes (new data source, different artifact format, alternative to tmux), the TUI does not change.
 
 ---
 
@@ -436,16 +547,24 @@ The TUI receives a Snapshot and queries the EventStore. It does not know how sna
 
 ### Issue Titles
 
-The TUI design shows issue titles at Level 1 and Level 2. The summary.json contains issue IDs only. Resolving titles would require `br show <id> --json` per issue per poll. This is deferred. The model can accommodate a title field on Run when it is added. For now, the TUI shows IDs only.
+Summary.json contains issue IDs only. Title resolution (via `br show`) is deferred. The Run type can accommodate a title field when added.
 
-### Queue State
+### Queue State Performance
 
-QueueState requires shelling out to `br` (two commands per project per poll). This is included from the start because the user typically has 1-2 projects and the latency is acceptable. If polling performance becomes a problem, queue reads can be made less frequent than the main poll interval (e.g., every 5th tick).
+Queue state requires shelling out to `br` per project per poll. Included from the start for 1-2 projects. If polling performance becomes a problem, queue reads can be made less frequent than the main poll interval.
+
+### Global Agent Matching
+
+Agents with no project association cannot be automatically matched to tmux sessions in the initial implementation. This requires either explicit session registration or a more sophisticated matching mechanism.
 
 ### Metrics Integration
 
-The current design reads run data from summary.json files. The metrics.jsonl file contains additional data (tokens, durations, harness version) that could enrich the snapshot. This is not included in the initial build. If needed, the snapshot builder can be extended to read metrics.jsonl without changing the model — just populate additional fields on Run.
+The metrics.jsonl file contains additional data (tokens, durations) that could enrich runs. Not included initially. The snapshot builder can be extended to read metrics without model changes.
 
 ### Session Persistence
 
-Events and snapshots are in-memory only. If watch restarts, event history is lost. This is intentional — watch is live-only. Historical review is a separate workflow. If persistence is ever needed, the EventStore interface supports it without changing consumers.
+Events and snapshots are in-memory only. Watch is live-only. Historical review is a separate workflow.
+
+### Multiple Agent Identities Per Project
+
+The initial implementation supports one agent identity per project for non-orca matching (the first match wins). Multiple distinct agent identities within a single project (e.g., "writer" and "reviewer" in the same repo) requires a richer matching mechanism and is deferred.

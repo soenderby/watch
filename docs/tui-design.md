@@ -6,9 +6,19 @@ Watch provides real-time awareness of all agent activity across projects. The TU
 
 The TUI optimizes for a single operator who wants maximum information density, keyboard-driven navigation, and zero interruptions.
 
-## Core Model: Zoom-Based Hierarchical Navigation
+## Core Concepts
 
-The TUI is a navigation stack. The default view is an ultra-dense overview of all sessions. The operator selects an item and drills in. Each level fills the screen with more detail about the selected item. `esc` always goes back.
+### Agent-Centric Model
+
+The TUI displays agents, not tmux sessions. An agent is a persistent identity (defined in the identity registry) that may have multiple concurrent instances (tmux sessions). The agent is the thing the operator cares about. Sessions are infrastructure.
+
+Tmux sessions not associated with a registered agent identity are invisible to watch. Watch monitors agents, not tmux.
+
+See `docs/core-abstractions.md` for the full data model.
+
+### Zoom-Based Hierarchical Navigation
+
+The TUI is a navigation stack. The default view is an ultra-dense overview of all agents. The operator selects an item and drills in. Each level fills the screen with more detail about the selected item. `esc` always goes back.
 
 This model was chosen over alternatives (split panes, tab views, scrolling lists) because:
 
@@ -20,41 +30,45 @@ This model was chosen over alternatives (split panes, tab views, scrolling lists
 
 ### Level 0: Overview
 
-The default view. Shows everything on one screen.
+The default view. Shows all agents on one screen.
 
 ```
-watch                                              7 sessions  10:45
+watch                                                  5 agents  10:45
 
-> orca                                                        3 ready
+> orca-worker (orca)                                          3 ready
     agent-1  running  orca-688  3m     agent-2  done  orca-9dy  1m
 
-  myproject                                                   0 ready
+  orca-worker (myproject)                                     0 ready
     agent-1  running  mp-42  2m
 
-  project-a    active    2m
-  project-b    active   15m
-  scratch      idle      1h
+  librarian (ai-resources)
+    session  active  2m
+
+  reviewer
+    session  active  15m
 
 j/k move  enter expand  g jump  q quit  ? help
 ```
 
 **Content:**
-- Orca projects are groups with inline agent previews. Agents are ordered by most recently active. When a project has 5 or more agents, the first 4 are shown followed by `+N more`.
-- Non-orca sessions are individual top-level items showing name, state, and age.
-- Queue state (ready count) is shown inline with each orca project.
+- Each agent is a row with its name, project association (if any), and inline instance summary.
+- Orca agents show their instances with slot names (agent-1, agent-2), state, issue, and duration. When 5 or more instances exist, the first 4 are shown followed by `+N more`. Instances ordered by most recently active.
+- Non-orca agents show their instances with basic state and age.
+- Queue state (ready count) is shown inline for orca project agents.
 
 **Cursor behavior:**
-- The cursor moves between top-level items: orca project groups and standalone sessions.
-- `enter` on a project group opens Level 1 project view.
-- `enter` on a standalone session opens Level 1 session view.
-- `g` on a standalone session jumps to that tmux session. `g` on a project group does nothing (drill in first to select a specific agent).
+- The cursor (`>`) moves between agents. It appears exactly once and is not used as a symbol elsewhere.
+- `enter` on an agent opens Level 1 agent detail.
+- `g` on an agent with exactly one instance jumps to that instance's tmux session. On an agent with multiple instances, `g` does nothing (drill in first to select a specific instance).
 
-### Level 1: Orca Project
+### Level 1: Agent Detail
 
-Expanded view of one orca project. Shows agents with full issue titles and project-scoped events.
+Expanded view of one agent. Shows all instances and agent-scoped events.
+
+For an orca agent:
 
 ```
-watch / orca                                                 esc back
+watch / orca-worker (orca)                                   esc back
 
   /mnt/c/code/orca                          3 ready  1 in progress
 
@@ -62,43 +76,42 @@ watch / orca                                                 esc back
   agent-2  done     orca-9dy  "Smoke test"                       1m
 
   events
-    10:44  agent-2  done     orca-9dy   merged
-    10:42  agent-1  started  orca-688
-    10:40  agent-2  started  orca-9dy
-    10:38  agent-1  session up
-    10:38  agent-2  session up
+    10:44  agent-2  done         orca-9dy   merged
+    10:42  agent-1  started      orca-688
+    10:40  agent-2  started      orca-9dy
+    10:38  agent-1  instance up
+    10:38  agent-2  instance up
 
 j/k move  enter detail  g jump  esc back  ? help
 ```
 
-**Design rationale — project-scoped events:** Events are scoped to the project being viewed. A global event stream would let busy projects drown out quiet ones, making it easy to miss a completion event for a project that only has one agent. Per-project event scoping ensures every project's activity is visible when the operator looks at it.
+For a non-orca agent:
+
+```
+watch / librarian (ai-resources)                             esc back
+
+> session  active  2m  windows: 2
+
+  events
+    10:43  instance up
+
+j/k move  g jump  esc back  ? help
+```
+
+**Design rationale — agent-scoped events:** Events are scoped to the agent being viewed. A busy agent's events do not drown out a quiet agent's events. Each agent's event history is independent.
 
 **Cursor behavior:**
-- Cursor moves between agents.
-- `enter` on an agent opens Level 2 agent detail.
-- `g` on an agent jumps to that agent's tmux session.
+- Cursor moves between instances.
+- `enter` on an orca instance opens Level 2 instance detail.
+- `enter` on a non-orca instance does nothing (there is no deeper detail).
+- `g` on any instance jumps to that instance's tmux session.
 
-### Level 1: Standalone Session
+### Level 2: Instance Detail (Orca)
 
-Minimal detail view for non-orca sessions.
-
-```
-watch / project-a                                            esc back
-
-  windows:  2
-  created:  10:43:00 (2m ago)
-
-  g jump  esc back
-```
-
-There is not much to show for a non-orca session beyond what tmux provides. This level exists for navigation consistency — `enter` always drills in, even when the detail is sparse.
-
-### Level 2: Agent Detail
-
-Full detail for one orca agent. Run history, events, and access to live output.
+Full detail for one orca instance. Run history, events, and access to live output.
 
 ```
-watch / orca / agent-1                                       esc back
+watch / orca-worker (orca) / agent-1                         esc back
 
   state:     running
   issue:     orca-688 "Delete cockpit surface"
@@ -114,30 +127,29 @@ watch / orca / agent-1                                       esc back
     10:42:15  run started   orca-688
     10:38:20  run done      orca-446  merged
     10:35:00  run done      orca-445  merged
-    10:34:12  session up
+    10:34:12  instance up
 
 j/k move  g jump  l log  esc back  ? help
 ```
 
 **Cursor behavior:**
 - Cursor moves between runs.
-- `g` jumps to the agent's tmux session. This is how the operator sees live agent output.
-- `l` opens the current run's `run.log` in a pager view within watch. `esc` or `q` exits the pager and returns to the detail view.
+- `g` jumps to the instance's tmux session. This is how the operator sees live agent output. Watch stays running.
+- `l` opens the current run's `run.log` in a pager view within watch. `esc` or `q` exits the pager.
 
 ## Navigation Stack
 
-Every `enter` pushes a view onto the stack. Every `esc` pops. The stack determines what is on screen.
+Every `enter` pushes a view onto the stack. Every `esc` pops.
 
 ```
 Level 0: Overview
-  enter on project group  →  Level 1: Orca Project
-  enter on session        →  Level 1: Standalone Session
+  enter on agent          →  Level 1: Agent Detail
 
-Level 1: Orca Project
-  enter on agent          →  Level 2: Agent Detail
+Level 1: Agent Detail
+  enter on orca instance  →  Level 2: Instance Detail
 
-Level 2: Agent Detail
-  g                       →  jump to agent tmux session
+Level 2: Instance Detail
+  g                       →  jump to instance tmux session
   l                       →  view run.log in pager
 
 esc at any level          →  go back one level
@@ -152,94 +164,76 @@ g on any jumpable item    →  switch tmux client to that session
 | `k` / `↑` | All levels | Move cursor up |
 | `enter` | All levels | Drill into selected item |
 | `esc` | Levels 1+ | Go back one level |
-| `g` | On session or agent | Jump to tmux session (watch stays running) |
-| `l` | Level 2 agent detail | View current run log in pager |
+| `g` | On instance | Jump to tmux session (watch stays running) |
+| `l` | Level 2 | View current run log in pager |
 | `r` | All levels | Force refresh |
 | `q` | All levels | Quit watch |
 | `?` | All levels | Toggle help overlay |
 
 **Keybinding decisions:**
-- vim-style `j`/`k` navigation, consistent with most terminal UIs. Arrow keys also work.
-- `g` for jump rather than `enter` because `enter` means drill in. Jumping to a tmux session and drilling into a detail view are different actions and should be different keys.
-- Keybinding reference is always visible at the bottom of the screen. It shows only the keys relevant to the current level. This removes the need to memorize bindings or consult external help.
+- vim-style `j`/`k` navigation. Arrow keys also work.
+- `g` for jump rather than `enter` because `enter` means drill in. Jumping and drilling are different actions.
+- Keybinding reference is always visible at the bottom. Shows only keys relevant to the current level.
 
 ## Visual Design Decisions
 
 ### No symbols or emoji for state
 
-Session state is conveyed through text: `running`, `done`, `failed`, `blocked`, `active`, `idle`. Symbols and emoji were rejected because:
-
-1. They add visual noise without proportional information value.
-2. They are ambiguous across fonts and terminals.
-3. When overused, they make the display harder to scan, not easier.
+Session state is conveyed through text: `running`, `done`, `failed`, `blocked`, `active`, `idle`. Symbols add visual noise without proportional information value.
 
 ### Cursor is `>` and appears exactly once
 
-The cursor must be instantly findable. Using `>` or any other symbol elsewhere in the UI (as decorators, list markers, or separators) would make the cursor ambiguous. The `>` character is reserved exclusively for the cursor position.
+The `>` character is reserved exclusively for the cursor position. It is not used as a decorator, list marker, or separator anywhere else in the UI.
 
 ### Monochrome
 
-No color coding. The TUI must be fully usable on any terminal without assuming color support or theme compatibility. Color may be added later as an optional enhancement if it provides clear scannability benefits, but the base design does not depend on it.
+No color coding. The TUI must be fully usable without color. Color may be added later as an optional enhancement.
 
 ### Dense by default
 
-The overview fits all sessions on one screen for typical workloads (5-15 sessions). Orca agents are packed two per line within project groups. Non-orca sessions are one per line. No blank lines between items except between groups.
+The overview fits all agents on one screen for typical workloads (5-15 agents). Orca instances are packed two per line. No blank lines between items except between agents.
 
 ### Breadcrumb header
 
-The header shows the navigation path (`watch / orca / agent-1`) so the operator always knows where they are. `esc back` on the right reinforces how to return.
+The header shows the navigation path (`watch / orca-worker (orca) / agent-1`) so the operator always knows where they are. `esc back` on the right.
 
 ## Data Model
 
-### Session Types
+The TUI renders from a Snapshot and queries an EventStore. It does not read tmux state or artifacts directly. See `docs/core-abstractions.md` for the full data model specification.
 
-The TUI displays two kinds of items:
+Key points for the TUI:
+- A Snapshot contains only agents with active instances. No orphaned entries.
+- Events are scoped per agent. Queried via `EventStore.ForAgent(name)`.
+- Agents can have multiple concurrent instances. The TUI displays all of them.
+- Unmatched tmux sessions (not associated with any agent) are invisible.
 
-1. **Orca project groups.** Identified by registered project config. Each group contains zero or more orca agent sessions, identified by tmux session naming convention. Enriched with artifact data (run results, issue IDs, durations) read from the project's `agent-logs/` directory.
+## Data Refresh
 
-2. **Standalone sessions.** Any tmux session that is not identified as an orca agent session. Shown with basic tmux state only (name, window count, created time, activity).
-
-### Events
-
-Events are derived by diffing tmux and artifact state snapshots on each poll cycle. An event is generated when:
-
-- A tmux session appears or disappears.
-- An orca run summary appears or changes (new run started, run completed, result changed).
-
-Events are:
-- **In-memory only.** No persistence. Watch is live-only; historical review is a separate workflow.
-- **Scoped per project** for orca sessions. Each project maintains its own event list.
-- **Capped.** A fixed number of recent events are retained (e.g., last 50 per project). Older events are discarded.
-
-### Refresh
-
-- Poll every 2-3 seconds. Each tick re-reads the tmux session list and scans registered project artifact directories.
-- No filesystem watchers or inotify. Polling is simple, predictable, and sufficient for the 2-3 second latency target.
+- Poll every 2-3 seconds. Each tick produces a new Snapshot and derives events from the diff.
+- No filesystem watchers. Polling is simple and predictable.
 - Refresh is opportunistic: if nothing changed, the display is not redrawn.
 
 ## Implementation
 
 ### Technology
 
-- **bubbletea** — Elm-architecture TUI framework for Go. Provides the update loop, key handling, and rendering model.
-- **lipgloss** — Terminal styling library (padding, alignment, borders). Used sparingly given the monochrome constraint.
-- **No generic list/table components from bubbles.** The navigation model (zoom-based stack with mixed item types) is custom enough that hand-rolled views are simpler than adapting generic components.
+- **bubbletea** — Elm-architecture TUI framework for Go.
+- **lipgloss** — Terminal styling (padding, alignment). Used sparingly given the monochrome constraint.
+- **No generic list/table components from bubbles.** The navigation model is custom enough that hand-rolled views are simpler.
 
 ### Architecture
 
-The TUI application consists of:
-
-1. **A navigation stack** — a slice of view models. Each view knows how to render itself and handle keys. `enter` pushes, `esc` pops.
-2. **A data store** — holds the current snapshot of tmux sessions, orca project state, and event history. Updated on each poll tick.
-3. **A poller** — a goroutine that periodically re-reads tmux and artifact state and sends update messages to the bubbletea program.
-4. **View models** for each level — overview, project detail, session detail, agent detail, log pager. Each is a bubbletea model that receives the shared data store and renders its level.
+1. **Navigation stack** — a slice of view models. Each view renders itself and handles keys. `enter` pushes, `esc` pops.
+2. **Data store** — holds the current Snapshot and EventStore. Updated on each poll tick.
+3. **Poller adapter** — a `tea.Cmd` that invokes the poller and sends update messages.
+4. **View models** — overview, agent detail, instance detail, log pager. Each receives the shared data store.
 
 ### Build Sequence
 
-1. Level 0 overview with project groups and standalone sessions. Static snapshot, cursor navigation, no events.
+1. Level 0 overview with agents and inline instances. Static snapshot, cursor navigation, no events.
 2. `enter`/`esc` navigation between Level 0 and Level 1.
-3. `g` jump from any session or agent.
+3. `g` jump from any instance.
 4. Polling and live refresh.
 5. Event detection from snapshot diffs. Events shown at Level 1.
-6. Level 2 agent detail with run history.
+6. Level 2 instance detail with run history.
 7. `l` log pager at Level 2.
