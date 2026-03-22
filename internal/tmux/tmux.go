@@ -15,21 +15,8 @@ type Session struct {
 	Windows  int       `json:"windows"`
 	Created  time.Time `json:"created"`
 	Attached bool      `json:"attached"`
-}
-
-// Available reports whether tmux is installed and a server is running.
-func Available() bool {
-	cmd := exec.Command("tmux", "list-sessions", "-F", "#{session_name}")
-	err := cmd.Run()
-	// tmux exits 1 when no server is running, which is fine — it's available but empty
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			// Exit code 1 = no sessions but tmux is available
-			return exitErr.ExitCode() == 1
-		}
-		return false
-	}
-	return true
+	Activity time.Time `json:"activity"` // last activity timestamp
+	Path     string    `json:"path"`     // working directory of the active pane
 }
 
 // Installed reports whether the tmux binary exists on PATH.
@@ -44,8 +31,8 @@ func ListSessions() ([]Session, error) {
 		return nil, fmt.Errorf("tmux is not installed")
 	}
 
-	// Format: name|windows|created_epoch|attached_flag
-	format := "#{session_name}|#{session_windows}|#{session_created}|#{session_attached}"
+	// Format: name|windows|created_epoch|attached_flag|activity_epoch|pane_path
+	format := "#{session_name}|#{session_windows}|#{session_created}|#{session_attached}|#{session_activity}|#{pane_current_path}"
 	cmd := exec.Command("tmux", "list-sessions", "-F", format)
 	out, err := cmd.Output()
 	if err != nil {
@@ -61,7 +48,7 @@ func ListSessions() ([]Session, error) {
 		if line == "" {
 			continue
 		}
-		s, err := parseSessionLine(line)
+		s, err := ParseSessionLine(line)
 		if err != nil {
 			continue // skip malformed lines
 		}
@@ -79,7 +66,7 @@ func SwitchClient(sessionName string) error {
 // AttachSession attaches to the given tmux session (for use outside tmux).
 func AttachSession(sessionName string) error {
 	cmd := exec.Command("tmux", "attach-session", "-t", sessionName)
-	cmd.Stdin = nil // attach needs a terminal, this is for reference
+	cmd.Stdin = nil
 	return cmd.Run()
 }
 
@@ -90,10 +77,12 @@ func InsideTmux() bool {
 	return err == nil
 }
 
-func parseSessionLine(line string) (Session, error) {
-	parts := strings.SplitN(line, "|", 4)
-	if len(parts) != 4 {
-		return Session{}, fmt.Errorf("expected 4 fields, got %d", len(parts))
+// ParseSessionLine parses a single line of tmux list-sessions output.
+// Exported for testing.
+func ParseSessionLine(line string) (Session, error) {
+	parts := strings.SplitN(line, "|", 6)
+	if len(parts) != 6 {
+		return Session{}, fmt.Errorf("expected 6 fields, got %d", len(parts))
 	}
 
 	windows, err := strconv.Atoi(parts[1])
@@ -101,18 +90,26 @@ func parseSessionLine(line string) (Session, error) {
 		windows = 0
 	}
 
-	createdEpoch, err := strconv.ParseInt(parts[2], 10, 64)
 	var created time.Time
-	if err == nil {
-		created = time.Unix(createdEpoch, 0)
+	if epoch, err := strconv.ParseInt(parts[2], 10, 64); err == nil {
+		created = time.Unix(epoch, 0)
 	}
 
 	attached := parts[3] == "1"
+
+	var activity time.Time
+	if epoch, err := strconv.ParseInt(parts[4], 10, 64); err == nil {
+		activity = time.Unix(epoch, 0)
+	}
+
+	path := parts[5]
 
 	return Session{
 		Name:     parts[0],
 		Windows:  windows,
 		Created:  created,
 		Attached: attached,
+		Activity: activity,
+		Path:     path,
 	}, nil
 }

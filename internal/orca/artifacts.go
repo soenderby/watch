@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -16,6 +17,7 @@ const (
 	RunsSubdir           = "runs"
 	SummaryFile          = "summary.json"
 	MetricsFile          = "metrics.jsonl"
+	LogFile              = "run.log"
 )
 
 // Summary represents the structured run summary from summary.json.
@@ -30,11 +32,13 @@ type Summary struct {
 	DiscoveryIDs     []string `json:"discovery_ids,omitempty"`
 }
 
-// RunInfo represents the state of a single run within a session.
+// RunInfo represents a single run within a session, as found in the artifact directory.
 type RunInfo struct {
-	RunID      string   `json:"run_id"`
-	HasSummary bool     `json:"has_summary"`
-	Summary    *Summary `json:"summary,omitempty"`
+	RunID       string   `json:"run_id"`
+	HasSummary  bool     `json:"has_summary"`
+	Summary     *Summary `json:"summary,omitempty"`
+	LogPath     string   `json:"log_path"`     // absolute path to run.log
+	SummaryPath string   `json:"summary_path"` // absolute path to summary.json
 }
 
 // SessionInfo represents an orca session found in the artifact directory.
@@ -45,12 +49,57 @@ type SessionInfo struct {
 	LatestRun *RunInfo  `json:"latest_run,omitempty"`
 }
 
+// orcaTimestampPattern matches the timestamp suffix in orca session names.
+var orcaTimestampPattern = regexp.MustCompile(`-(\d{8}T\d{6}Z)$`)
+
 // IsOrcaSession reports whether a tmux session name matches the orca naming convention.
+// The convention is <prefix>-<index>-<timestamp>, e.g. "orca-agent-1-20260320T091355Z".
 func IsOrcaSession(name string, prefix string) bool {
 	if prefix == "" {
 		prefix = DefaultSessionPrefix
 	}
-	return strings.HasPrefix(name, prefix+"-")
+	if !strings.HasPrefix(name, prefix+"-") {
+		return false
+	}
+	// Must end with a timestamp.
+	return orcaTimestampPattern.MatchString(name)
+}
+
+// ExtractAgentSlot extracts the agent slot identifier from an orca tmux session name.
+// For "orca-agent-1-20260320T091355Z" with prefix "orca-agent", returns "agent-1".
+// Returns empty string if the name doesn't match the convention.
+func ExtractAgentSlot(name string, prefix string) string {
+	if prefix == "" {
+		prefix = DefaultSessionPrefix
+	}
+	if !strings.HasPrefix(name, prefix+"-") {
+		return ""
+	}
+	// Strip prefix and trailing timestamp.
+	rest := strings.TrimPrefix(name, prefix+"-")
+	loc := orcaTimestampPattern.FindStringIndex(rest)
+	if loc == nil {
+		return ""
+	}
+	slot := rest[:loc[0]]
+	if slot == "" {
+		return ""
+	}
+	// Remove trailing dash if present.
+	return strings.TrimSuffix(slot, "-")
+}
+
+// ExtractSessionID extracts the orca session ID from an orca tmux session name.
+// For "orca-agent-1-20260320T091355Z" with prefix "orca-agent", returns
+// "agent-1-20260320T091355Z" (the part after the prefix).
+func ExtractSessionID(name string, prefix string) string {
+	if prefix == "" {
+		prefix = DefaultSessionPrefix
+	}
+	if !strings.HasPrefix(name, prefix+"-") {
+		return ""
+	}
+	return strings.TrimPrefix(name, prefix+"-")
 }
 
 // FindSessions scans a project's agent-logs directory for session artifacts.
@@ -119,7 +168,6 @@ func findDateDirs(sessionsRoot string, maxDirs int) ([]dateDir, error) {
 
 	var dirs []dateDir
 
-	// Walk YYYY/MM/DD structure
 	years, err := os.ReadDir(sessionsRoot)
 	if err != nil {
 		return nil, err
@@ -154,7 +202,6 @@ func findDateDirs(sessionsRoot string, maxDirs int) ([]dateDir, error) {
 		}
 	}
 
-	// Sort descending by path (lexicographic on YYYY/MM/DD works)
 	sort.Slice(dirs, func(i, j int) bool {
 		return dirs[i].relative > dirs[j].relative
 	})
@@ -180,8 +227,13 @@ func findRuns(sessionPath string) []RunInfo {
 		runID := entry.Name()
 		runPath := filepath.Join(runsPath, runID)
 		summaryPath := filepath.Join(runPath, SummaryFile)
+		logPath := filepath.Join(runPath, LogFile)
 
-		ri := RunInfo{RunID: runID}
+		ri := RunInfo{
+			RunID:       runID,
+			LogPath:     logPath,
+			SummaryPath: summaryPath,
+		}
 		if summary, err := ReadSummary(summaryPath); err == nil {
 			ri.HasSummary = true
 			ri.Summary = summary
@@ -189,7 +241,6 @@ func findRuns(sessionPath string) []RunInfo {
 		runs = append(runs, ri)
 	}
 
-	// Sort by run ID (lexicographic on zero-padded sequence works)
 	sort.Slice(runs, func(i, j int) bool {
 		return runs[i].RunID < runs[j].RunID
 	})
