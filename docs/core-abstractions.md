@@ -568,3 +568,27 @@ Events and snapshots are in-memory only. Watch is live-only. Historical review i
 ### Multiple Agent Identities Per Project
 
 The initial implementation supports one agent identity per project for non-orca matching (the first match wins). Multiple distinct agent identities within a single project (e.g., "writer" and "reviewer" in the same repo) requires a richer matching mechanism and is deferred.
+
+---
+
+## Implementation Notes
+
+Observations from the initial implementation that inform future work.
+
+### Working Directory Matching
+
+Non-orca session matching uses `tmux`'s reported working directory (`pane_current_path`). This matches any tmux session whose working directory is within a registered project path, which can produce false positives. For example, a session that was opened for an unrelated purpose but whose shell happens to be in a project directory will match as an agent instance.
+
+This is acceptable for the initial implementation because the operator controls the identity registry and can observe incorrect matches. A more robust matching mechanism (explicit session tagging, process inspection, or naming conventions) may be needed if false positives become a persistent problem.
+
+### Queue State
+
+Queue state reading is stubbed in the poller (returns `QueueState.Available = false`). Integrating with `br` requires shelling out per project per poll. This was deferred because the queue state display is secondary to agent/instance visibility. It should be implemented when orca's queue integration is validated cross-project.
+
+### Identity Extraction
+
+The `internal/identity` package is designed with extraction to lore in mind. It has no dependencies on other watch internal packages. The file format (`agents.json`) and the `Registry` interface are intentionally simple. When lore is built, this package moves there and watch becomes a consumer of lore's registry rather than owning it.
+
+### Event Derivation
+
+Events are derived from snapshot diffs, not from real-time observation. This means events that happen between poll intervals (e.g., a session appears and disappears within 3 seconds) are missed. This is acceptable for the current poll-based model. If higher fidelity is needed, filesystem watchers or tmux hooks could supplement polling, but the complexity cost is not justified yet.
