@@ -3,13 +3,15 @@ package main
 import (
 	"fmt"
 	"os"
+
+	"github.com/soenderby/watch/internal/config"
 )
 
 const version = "0.1.0-dev"
 
 func main() {
 	if len(os.Args) < 2 {
-		// No subcommand: will be TUI mode in the future
+		// No subcommand: will be TUI mode in the future.
 		fmt.Println("watch: TUI mode not yet implemented. Use a subcommand.")
 		fmt.Println()
 		printUsage()
@@ -47,8 +49,8 @@ func printUsage() {
 	fmt.Println(`Usage: watch [command]
 
 Commands:
-  list          List all tmux sessions with state
-  status        One-line summary of session state
+  list          List agents with active instances
+  status        One-line summary of agent state
   project       Manage registered projects
   version       Print version
   help          Print this help
@@ -57,4 +59,9 @@ When run with no command, enters TUI mode (not yet implemented).
 
 Options:
   --json        Machine-readable output (list, status, project list)`)
+}
+
+// configPath returns the path to the watch config file.
+func configPath() (string, error) {
+	return config.DefaultPath()
 }

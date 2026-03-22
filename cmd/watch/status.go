@@ -4,17 +4,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-
-	"github.com/soenderby/watch/internal/orca"
-	"github.com/soenderby/watch/internal/tmux"
 )
 
 // StatusSummary is the machine-readable status output.
 type StatusSummary struct {
-	TotalSessions int `json:"total_sessions"`
-	OrcaSessions  int `json:"orca_sessions"`
-	OtherSessions int `json:"other_sessions"`
-	Attached      int `json:"attached"`
+	Agents    int `json:"agents"`
+	Instances int `json:"instances"`
 }
 
 func runStatus(args []string) error {
@@ -25,35 +20,27 @@ func runStatus(args []string) error {
 			outputJSON = true
 		case "--help", "-h":
 			fmt.Println("Usage: watch status [--json]")
-			fmt.Println("\nOne-line summary of tmux session state.")
+			fmt.Println("\nOne-line summary of agent state.")
 			return nil
 		default:
 			return fmt.Errorf("unknown option: %s", arg)
 		}
 	}
 
-	if !tmux.Installed() {
-		return fmt.Errorf("tmux is not installed")
-	}
-
-	sessions, err := tmux.ListSessions()
+	result, err := singlePoll()
 	if err != nil {
 		return err
 	}
 
-	summary := StatusSummary{
-		TotalSessions: len(sessions),
+	snap := result.Snapshot
+	totalInstances := 0
+	for _, agent := range snap.Agents {
+		totalInstances += len(agent.Instances)
 	}
 
-	for _, s := range sessions {
-		if orca.IsOrcaSession(s.Name, "") {
-			summary.OrcaSessions++
-		} else {
-			summary.OtherSessions++
-		}
-		if s.Attached {
-			summary.Attached++
-		}
+	summary := StatusSummary{
+		Agents:    len(snap.Agents),
+		Instances: totalInstances,
 	}
 
 	if outputJSON {
@@ -62,6 +49,6 @@ func runStatus(args []string) error {
 		return enc.Encode(summary)
 	}
 
-	fmt.Printf("%d sessions (%d orca, %d other)\n", summary.TotalSessions, summary.OrcaSessions, summary.OtherSessions)
+	fmt.Printf("%d agents, %d instances\n", summary.Agents, summary.Instances)
 	return nil
 }
