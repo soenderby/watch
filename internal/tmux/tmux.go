@@ -11,10 +11,10 @@ import (
 
 // Session represents a tmux session.
 type Session struct {
-	Name      string    `json:"name"`
-	Windows   int       `json:"windows"`
-	Created   time.Time `json:"created"`
-	Attached  bool      `json:"attached"`
+	Name     string    `json:"name"`
+	Windows  int       `json:"windows"`
+	Created  time.Time `json:"created"`
+	Attached bool      `json:"attached"`
 }
 
 // Available reports whether tmux is installed and a server is running.
