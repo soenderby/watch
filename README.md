@@ -1,6 +1,8 @@
 # Watch
 
-Operator supervision tool for agent activity. Monitors tmux sessions across projects, enriches orca batch sessions with artifact data, and provides interactive navigation.
+Operator supervision tool for agent activity.
+
+Watch builds an agent-centric view from tmux sessions, project config, agent identities, and orca artifacts. It can be used from both CLI and TUI.
 
 Part of the orca ecosystem. See [orca/docs/ecosystem.md](https://github.com/soenderby/orca/blob/main/docs/ecosystem.md) for the broader vision.
 
@@ -19,17 +21,14 @@ go build -o watch ./cmd/watch/
 ## Usage
 
 ```bash
-# Register a project for orca artifact enrichment
+# Register a project
 watch project add myproject /path/to/repo
 
-# List all tmux sessions
+# Inspect current state
 watch list
-watch list --json
-
-# Quick status summary
 watch status
 
-# TUI mode (not yet implemented)
+# TUI mode
 watch
 ```
 
@@ -37,23 +36,72 @@ watch
 
 | Command | Purpose |
 |---|---|
-| `list [--json]` | List all tmux sessions with state and orca enrichment |
-| `status [--json]` | One-line summary of session counts |
+| `watch` | Launch the interactive TUI |
+| `list [--json]` | List agents with active instances |
+| `status [--json]` | One-line summary of active agent/instance counts |
 | `project add <name> <path>` | Register a project |
 | `project remove <name>` | Unregister a project |
 | `project list [--json]` | List registered projects |
 | `version` | Print version |
 
-## How It Works
-
-Watch monitors all tmux sessions on the machine. It identifies orca sessions by naming convention (`orca-agent-*`) and enriches them with data from the project's `agent-logs/` directory (run results, issue IDs).
-
-Non-orca sessions (interactive conversations, ad-hoc tasks) are shown with basic tmux state.
-
 ## Configuration
 
-Config lives at `~/.config/watch/config.json`. Managed via `watch project` commands.
+### Project registry
+
+Project config lives at `~/.config/watch/config.json` and is managed via `watch project ...` commands.
+
+### Agent identity registry
+
+Watch only shows sessions that can be matched to a registered agent identity.
+
+Identity definitions are loaded from:
+
+1. `~/.config/watch/agents.json` (global)
+2. `<project-root>/agents.json` (project-local, merged)
+
+When names collide, global entries win.
+
+Minimal example:
+
+```json
+{
+  "agents": [
+    {"name": "orca-worker", "project": "orca", "description": "Batch worker"},
+    {"name": "librarian", "project": "ai-resources", "description": "Knowledge agent"}
+  ]
+}
+```
+
+## How It Works
+
+Data flow:
+
+1. Read config + identity registry
+2. Read tmux sessions
+3. Read project artifacts (`agent-logs/sessions/...`)
+4. Build a snapshot of active agents/instances
+5. Diff snapshots to derive events
+6. Render CLI/TUI from snapshot + event store
+
+Matching behavior:
+
+- **Orca sessions**: matched by orca naming convention + artifact session ID.
+- **Non-orca sessions**: matched by tmux working directory under a registered project path.
+- **Unmatched sessions**: ignored (not shown).
 
 ## Status
 
-Early development. CLI mode works. TUI mode, session jump, and notification buffer are planned.
+Active development (`0.1.0-dev`).
+
+Implemented:
+- agent-centric snapshot model
+- snapshot diff + per-agent event store
+- CLI: `list`, `status`, `project ...`
+- TUI navigation (overview → agent detail → instance detail)
+- tmux jump (`g`) and run log pager (`l`)
+
+Deferred / not yet implemented:
+- queue state via `br` integration (currently unavailable)
+- automatic matching for global (project-less) agents
+- richer matching when multiple distinct non-orca identities exist in one project
+- help overlay (`?`) in TUI

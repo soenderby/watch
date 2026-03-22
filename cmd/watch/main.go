@@ -55,7 +55,7 @@ Commands:
   version       Print version
   help          Print this help
 
-When run with no command, enters TUI mode (not yet implemented).
+When run with no command, enters TUI mode.
 
 Options:
   --json        Machine-readable output (list, status, project list)`)

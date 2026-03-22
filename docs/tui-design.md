@@ -6,6 +6,21 @@ Watch provides real-time awareness of all agent activity across projects. The TU
 
 The TUI optimizes for a single operator who wants maximum information density, keyboard-driven navigation, and zero interruptions.
 
+## Implementation Status (0.1.0-dev)
+
+Implemented:
+- Overview → Agent Detail → Instance Detail navigation stack
+- Poll-driven live refresh (3s)
+- Agent-scoped events in detail views
+- `g` tmux jump and `l` run log pager
+
+Deferred:
+- Help overlay (`?`) is reserved but not yet implemented
+- Queue counters are rendered only when queue data is available (poller currently marks queue unavailable)
+
+Known divergence from the ideal examples below:
+- Level 2 breadcrumb currently repeats the agent name instead of showing the selected slot/session label.
+
 ## Core Concepts
 
 ### Agent-Centric Model
@@ -168,7 +183,7 @@ g on any jumpable item    →  switch tmux client to that session
 | `l` | Level 2 | View current run log in pager |
 | `r` | All levels | Force refresh |
 | `q` | All levels | Quit watch |
-| `?` | All levels | Toggle help overlay |
+| `?` | All levels | Reserved (help overlay not yet implemented) |
 
 **Keybinding decisions:**
 - vim-style `j`/`k` navigation. Arrow keys also work.
@@ -211,7 +226,7 @@ Key points for the TUI:
 
 - Poll every 2-3 seconds. Each tick produces a new Snapshot and derives events from the diff.
 - No filesystem watchers. Polling is simple and predictable.
-- Refresh is opportunistic: if nothing changed, the display is not redrawn.
+- Current behavior: the app updates on each poll tick. Opportunistic redraw optimization is deferred.
 
 ## Implementation
 
