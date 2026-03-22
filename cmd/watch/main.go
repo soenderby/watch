@@ -11,10 +11,10 @@ const version = "0.1.0-dev"
 
 func main() {
 	if len(os.Args) < 2 {
-		// No subcommand: will be TUI mode in the future.
-		fmt.Println("watch: TUI mode not yet implemented. Use a subcommand.")
-		fmt.Println()
-		printUsage()
+		if err := runTUI(); err != nil {
+			fmt.Fprintf(os.Stderr, "watch: %v\n", err)
+			os.Exit(1)
+		}
 		os.Exit(0)
 	}
 
