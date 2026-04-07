@@ -8,14 +8,75 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // AgentIdentity defines a persistent agent identity.
 type AgentIdentity struct {
-	Name        string `json:"name"`
-	Project     string `json:"project,omitempty"`
-	PrimingRef  string `json:"priming_ref,omitempty"`
-	Description string `json:"description,omitempty"`
+	Name        string      `json:"name"`
+	Project     string      `json:"project,omitempty"`
+	PrimingRef  string      `json:"priming_ref,omitempty"`
+	Description string      `json:"description,omitempty"`
+	Match       *MatchRules `json:"match,omitempty"`
+}
+
+// MatchRules defines how a tmux session is matched to an agent identity.
+// All non-empty fields must match.
+type MatchRules struct {
+	SessionPattern string `json:"session_pattern,omitempty"` // glob pattern on tmux session name
+	PathPrefix     string `json:"path_prefix,omitempty"`     // absolute path prefix on tmux working directory
+}
+
+// HasExplicitMatch reports whether the identity has explicit match rules.
+func (a AgentIdentity) HasExplicitMatch() bool {
+	if a.Match == nil {
+		return false
+	}
+	return a.Match.SessionPattern != "" || a.Match.PathPrefix != ""
+}
+
+// MatchesSession reports whether this identity's explicit match rules match
+// the given tmux session metadata.
+func (a AgentIdentity) MatchesSession(sessionName, sessionPath string) bool {
+	if !a.HasExplicitMatch() {
+		return false
+	}
+	if a.Match == nil {
+		return false
+	}
+
+	if a.Match.SessionPattern != "" {
+		matched, err := filepath.Match(a.Match.SessionPattern, sessionName)
+		if err != nil || !matched {
+			return false
+		}
+	}
+
+	if a.Match.PathPrefix != "" {
+		prefix := filepath.Clean(a.Match.PathPrefix)
+		sessionPath = filepath.Clean(sessionPath)
+		if sessionPath == "" {
+			return false
+		}
+		if sessionPath != prefix && !strings.HasPrefix(sessionPath, prefix+string(filepath.Separator)) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// ResolvePathPrefix resolves a match path prefix against a project root when
+// the prefix is relative. Absolute prefixes are cleaned and returned as-is.
+func ResolvePathPrefix(prefix, projectRoot string) string {
+	prefix = filepath.Clean(prefix)
+	if prefix == "" {
+		return ""
+	}
+	if filepath.IsAbs(prefix) || projectRoot == "" {
+		return prefix
+	}
+	return filepath.Clean(filepath.Join(projectRoot, prefix))
 }
 
 // Registry holds all known agent identities.
@@ -142,6 +203,10 @@ func BuildRegistry(globalPath string, projects []ProjectSource) (*Registry, erro
 			// Set project if not specified.
 			if a.Project == "" {
 				a.Project = proj.Name
+			}
+			// Allow project-local path prefixes to be relative to the project root.
+			if a.Match != nil && a.Match.PathPrefix != "" {
+				a.Match.PathPrefix = ResolvePathPrefix(a.Match.PathPrefix, proj.Path)
 			}
 			all = append(all, a)
 		}

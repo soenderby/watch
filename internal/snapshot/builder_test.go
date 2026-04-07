@@ -1,6 +1,7 @@
 package snapshot
 
 import (
+	"encoding/json"
 	"os"
 	"testing"
 	"time"
@@ -165,6 +166,145 @@ func TestBuild_MultipleInstances(t *testing.T) {
 	}
 }
 
+func TestBuild_MatchingRules_OrcaSessionPattern(t *testing.T) {
+	reg := registryWith(t, []identity.AgentIdentity{
+		{Name: "worker-a", Project: "orca", Match: &identity.MatchRules{SessionPattern: "orca-agent-1-*"}},
+		{Name: "worker-b", Project: "orca", Match: &identity.MatchRules{SessionPattern: "orca-agent-2-*"}},
+	})
+
+	snap := Build(Input{
+		Timestamp: t0,
+		Registry:  reg,
+		Projects:  []ProjectConfig{{Name: "orca", Path: "/code/orca"}},
+		TmuxSessions: []TmuxSession{
+			{Name: "orca-agent-2-20260320T100000Z", Activity: t0},
+		},
+		Artifacts: map[string]ProjectArtifacts{
+			"orca": {
+				Sessions: []orca.SessionInfo{{SessionID: "2-20260320T100000Z"}},
+			},
+		},
+	})
+
+	if len(snap.Agents) != 1 {
+		t.Fatalf("expected 1 matched agent, got %d", len(snap.Agents))
+	}
+	if snap.Agents[0].Name != "worker-b" {
+		t.Fatalf("expected worker-b, got %q", snap.Agents[0].Name)
+	}
+}
+
+func TestBuild_MatchingRules_ProjectAmbiguousWithoutRules(t *testing.T) {
+	reg := registryWith(t, []identity.AgentIdentity{
+		{Name: "worker-a", Project: "orca"},
+		{Name: "worker-b", Project: "orca"},
+	})
+
+	snap := Build(Input{
+		Timestamp: t0,
+		Registry:  reg,
+		Projects:  []ProjectConfig{{Name: "orca", Path: "/code/orca"}},
+		TmuxSessions: []TmuxSession{
+			{Name: "orca-agent-1-20260320T100000Z", Activity: t0},
+		},
+		Artifacts: map[string]ProjectArtifacts{
+			"orca": {
+				Sessions: []orca.SessionInfo{{SessionID: "1-20260320T100000Z"}},
+			},
+		},
+	})
+
+	if len(snap.Agents) != 0 {
+		t.Fatalf("expected no match for ambiguous identities, got %d agents", len(snap.Agents))
+	}
+}
+
+func TestBuild_MatchingRules_NonOrcaPathPrefix(t *testing.T) {
+	reg := registryWith(t, []identity.AgentIdentity{
+		{Name: "writer", Project: "docs", Match: &identity.MatchRules{PathPrefix: "/code/docs/writer"}},
+		{Name: "reviewer", Project: "docs", Match: &identity.MatchRules{PathPrefix: "/code/docs/reviewer"}},
+	})
+
+	snap := Build(Input{
+		Timestamp: t0,
+		Registry:  reg,
+		Projects:  []ProjectConfig{{Name: "docs", Path: "/code/docs"}},
+		TmuxSessions: []TmuxSession{
+			{Name: "session-1", Path: "/code/docs/reviewer/task", Activity: t0},
+		},
+		Artifacts: map[string]ProjectArtifacts{},
+	})
+
+	if len(snap.Agents) != 1 {
+		t.Fatalf("expected 1 matched agent, got %d", len(snap.Agents))
+	}
+	if snap.Agents[0].Name != "reviewer" {
+		t.Fatalf("expected reviewer, got %q", snap.Agents[0].Name)
+	}
+}
+
+func TestBuild_MatchingRules_GlobalExplicit(t *testing.T) {
+	reg := registryWith(t, []identity.AgentIdentity{
+		{Name: "reviewer", Match: &identity.MatchRules{SessionPattern: "review-*"}},
+	})
+
+	snap := Build(Input{
+		Timestamp: t0,
+		Registry:  reg,
+		TmuxSessions: []TmuxSession{
+			{Name: "review-1", Path: "/tmp", Activity: t0},
+		},
+	})
+
+	if len(snap.Agents) != 1 {
+		t.Fatalf("expected 1 global match, got %d", len(snap.Agents))
+	}
+	if snap.Agents[0].Name != "reviewer" {
+		t.Fatalf("expected reviewer, got %q", snap.Agents[0].Name)
+	}
+}
+
+func TestBuild_MatchingRules_GlobalExplicitBeatsProjectFallback(t *testing.T) {
+	reg := registryWith(t, []identity.AgentIdentity{
+		{Name: "project-default", Project: "docs"},
+		{Name: "reviewer", Match: &identity.MatchRules{SessionPattern: "review-*"}},
+	})
+
+	snap := Build(Input{
+		Timestamp: t0,
+		Registry:  reg,
+		Projects:  []ProjectConfig{{Name: "docs", Path: "/code/docs"}},
+		TmuxSessions: []TmuxSession{
+			{Name: "review-1", Path: "/code/docs", Activity: t0},
+		},
+	})
+
+	if len(snap.Agents) != 1 {
+		t.Fatalf("expected 1 agent, got %d", len(snap.Agents))
+	}
+	if snap.Agents[0].Name != "reviewer" {
+		t.Fatalf("expected reviewer, got %q", snap.Agents[0].Name)
+	}
+}
+
+func TestBuild_MatchingRules_GlobalNeedsExplicitRules(t *testing.T) {
+	reg := registryWith(t, []identity.AgentIdentity{
+		{Name: "reviewer"},
+	})
+
+	snap := Build(Input{
+		Timestamp: t0,
+		Registry:  reg,
+		TmuxSessions: []TmuxSession{
+			{Name: "review-1", Path: "/tmp", Activity: t0},
+		},
+	})
+
+	if len(snap.Agents) != 0 {
+		t.Fatalf("expected no global match without explicit rules, got %d", len(snap.Agents))
+	}
+}
+
 func TestBuild_StateDerivation(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -305,23 +445,12 @@ func registryWith(t *testing.T, agents []identity.AgentIdentity) *identity.Regis
 	dir := t.TempDir()
 	path := dir + "/agents.json"
 
-	data := `{"agents":[`
-	for i, a := range agents {
-		if i > 0 {
-			data += ","
-		}
-		data += `{"name":"` + a.Name + `"`
-		if a.Project != "" {
-			data += `,"project":"` + a.Project + `"`
-		}
-		if a.Description != "" {
-			data += `,"description":"` + a.Description + `"`
-		}
-		data += `}`
+	payload := map[string]any{"agents": agents}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
 	}
-	data += `]}`
-
-	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+	if err := os.WriteFile(path, data, 0644); err != nil {
 		t.Fatal(err)
 	}
 	reg, err := identity.BuildRegistry(path, nil)

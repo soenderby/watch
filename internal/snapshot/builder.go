@@ -65,19 +65,21 @@ func Build(in Input) *model.Snapshot {
 		snap.Projects = append(snap.Projects, p)
 	}
 
-	// Index artifact sessions by session ID for each project.
-	type artifactIndex struct {
-		projectName string
-		session     orca.SessionInfo
+	// Index projects by name.
+	projectsByName := make(map[string]ProjectConfig, len(in.Projects))
+	for _, proj := range in.Projects {
+		projectsByName[proj.Name] = proj
 	}
-	artifactsBySessionID := make(map[string]artifactIndex)
+
+	// Index artifact sessions by session ID for each project.
+	artifactsBySessionID := make(map[string][]artifactIndex)
 	for _, proj := range in.Projects {
 		if arts, ok := in.Artifacts[proj.Name]; ok {
 			for _, s := range arts.Sessions {
-				artifactsBySessionID[s.SessionID] = artifactIndex{
+				artifactsBySessionID[s.SessionID] = append(artifactsBySessionID[s.SessionID], artifactIndex{
 					projectName: proj.Name,
 					session:     s,
-				}
+				})
 			}
 		}
 	}
@@ -87,15 +89,28 @@ func Build(in Input) *model.Snapshot {
 
 	for _, ts := range in.TmuxSessions {
 		matched := false
+		isOrca := orca.IsOrcaSession(ts.Name, "")
 
-		// Try orca matching first.
-		if orca.IsOrcaSession(ts.Name, "") {
+		// Non-orca sessions may have a project context from working directory.
+		projectAgents := []identity.AgentIdentity(nil)
+		hasProjectContext := false
+		if !isOrca && ts.Path != "" {
+			if projectName, ok := pickProjectForPath(ts.Path, in.Projects); ok {
+				hasProjectContext = true
+				projectAgents = in.Registry.ForProject(projectName)
+			}
+		}
+
+		// Orca sessions are matched by artifact session ID first.
+		if isOrca {
 			sessionID := orca.ExtractSessionID(ts.Name, "")
-			if ai, ok := artifactsBySessionID[sessionID]; ok {
-				// Find the agent identity for this project.
+			if ai, ok := pickArtifactSession(artifactsBySessionID[sessionID], ts.Path, projectsByName); ok {
 				projAgents := in.Registry.ForProject(ai.projectName)
-				if len(projAgents) > 0 {
-					agentID := &projAgents[0] // first agent identity for this project
+				agentID := pickAgentIdentity(projAgents, ts)
+				if agentID == nil {
+					agentID = pickFallbackIdentity(projAgents)
+				}
+				if agentID != nil {
 					inst := buildOrcaInstance(ts, ai.session, ai.projectName)
 					ensureAgent(agents, agentID).instances = append(
 						ensureAgent(agents, agentID).instances, inst,
@@ -105,28 +120,40 @@ func Build(in Input) *model.Snapshot {
 			}
 		}
 
-		// Try non-orca matching by working directory.
-		if !matched && ts.Path != "" {
-			for _, proj := range in.Projects {
-				if isPathWithin(ts.Path, proj.Path) {
-					projAgents := in.Registry.ForProject(proj.Name)
-					if len(projAgents) > 0 {
-						agentID := &projAgents[0]
-						// Don't double-match if this is actually an orca session
-						// that just didn't have artifacts.
-						if orca.IsOrcaSession(ts.Name, "") {
-							continue
-						}
-						inst := buildNonOrcaInstance(ts)
-						ensureAgent(agents, agentID).instances = append(
-							ensureAgent(agents, agentID).instances, inst,
-						)
-						matched = true
-						break
-					}
-				}
+		// Project-scoped explicit rules for non-orca sessions.
+		if !matched && hasProjectContext {
+			if agentID := pickAgentIdentity(projectAgents, ts); agentID != nil {
+				inst := buildNonOrcaInstance(ts)
+				ensureAgent(agents, agentID).instances = append(
+					ensureAgent(agents, agentID).instances, inst,
+				)
+				matched = true
 			}
 		}
+
+		// Global identities can match any session via explicit rules.
+		if !matched {
+			globals := in.Registry.Global()
+			if agentID := pickAgentIdentity(globals, ts); agentID != nil {
+				inst := buildNonOrcaInstance(ts)
+				ensureAgent(agents, agentID).instances = append(
+					ensureAgent(agents, agentID).instances, inst,
+				)
+				matched = true
+			}
+		}
+
+		// Project-scoped fallback applies only when explicit matching did not.
+		if !matched && hasProjectContext {
+			if agentID := pickFallbackIdentity(projectAgents); agentID != nil {
+				inst := buildNonOrcaInstance(ts)
+				ensureAgent(agents, agentID).instances = append(
+					ensureAgent(agents, agentID).instances, inst,
+				)
+				matched = true
+			}
+		}
+
 		// Unmatched sessions are ignored.
 		_ = matched
 	}
@@ -156,6 +183,104 @@ func Build(in Input) *model.Snapshot {
 type agentAccum struct {
 	identity  *identity.AgentIdentity
 	instances []*model.Instance
+}
+
+type artifactIndex struct {
+	projectName string
+	session     orca.SessionInfo
+}
+
+func pickArtifactSession(candidates []artifactIndex, sessionPath string, projectsByName map[string]ProjectConfig) (artifactIndex, bool) {
+	if len(candidates) == 0 {
+		return artifactIndex{}, false
+	}
+	if len(candidates) == 1 {
+		return candidates[0], true
+	}
+	if sessionPath == "" {
+		return artifactIndex{}, false
+	}
+
+	var filtered []artifactIndex
+	for _, c := range candidates {
+		proj, ok := projectsByName[c.projectName]
+		if !ok {
+			continue
+		}
+		if isPathWithin(sessionPath, proj.Path) {
+			filtered = append(filtered, c)
+		}
+	}
+	if len(filtered) == 1 {
+		return filtered[0], true
+	}
+	return artifactIndex{}, false
+}
+
+func pickProjectForPath(sessionPath string, projects []ProjectConfig) (string, bool) {
+	best := ""
+	bestLen := -1
+	tie := false
+
+	for _, proj := range projects {
+		if proj.Path == "" || !isPathWithin(sessionPath, proj.Path) {
+			continue
+		}
+		l := len(filepath.Clean(proj.Path))
+		if l > bestLen {
+			best = proj.Name
+			bestLen = l
+			tie = false
+			continue
+		}
+		if l == bestLen {
+			tie = true
+		}
+	}
+
+	if best == "" || tie {
+		return "", false
+	}
+	return best, true
+}
+
+func pickAgentIdentity(candidates []identity.AgentIdentity, session TmuxSession) *identity.AgentIdentity {
+	var explicit []*identity.AgentIdentity
+
+	for i := range candidates {
+		candidate := &candidates[i]
+		if !candidate.HasExplicitMatch() {
+			continue
+		}
+		if !matchesIdentityRules(*candidate, session) {
+			continue
+		}
+		explicit = append(explicit, candidate)
+	}
+
+	if len(explicit) == 1 {
+		return explicit[0]
+	}
+	return nil
+}
+
+func pickFallbackIdentity(candidates []identity.AgentIdentity) *identity.AgentIdentity {
+	var fallback []*identity.AgentIdentity
+	for i := range candidates {
+		candidate := &candidates[i]
+		if candidate.HasExplicitMatch() {
+			continue
+		}
+		fallback = append(fallback, candidate)
+	}
+	if len(fallback) == 1 {
+		return fallback[0]
+	}
+	return nil
+}
+
+func matchesIdentityRules(candidate identity.AgentIdentity, session TmuxSession) bool {
+	return candidate.MatchesSession(session.Name, session.Path)
 }
 
 func ensureAgent(agents map[string]*agentAccum, id *identity.AgentIdentity) *agentAccum {

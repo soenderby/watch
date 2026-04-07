@@ -51,6 +51,42 @@ func TestLoadFile_Valid(t *testing.T) {
 	}
 }
 
+func TestLoadFile_MatchRules(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agents.json")
+	data := `{
+		"agents": [
+			{
+				"name": "reviewer",
+				"match": {
+					"session_pattern": "review-*",
+					"path_prefix": "/code/review"
+				}
+			}
+		]
+	}`
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	agents, err := LoadFile(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(agents) != 1 {
+		t.Fatalf("expected 1 agent, got %d", len(agents))
+	}
+	if agents[0].Match == nil {
+		t.Fatal("expected match rules")
+	}
+	if agents[0].Match.SessionPattern != "review-*" {
+		t.Fatalf("expected session pattern review-*, got %q", agents[0].Match.SessionPattern)
+	}
+	if agents[0].Match.PathPrefix != "/code/review" {
+		t.Fatalf("expected path prefix /code/review, got %q", agents[0].Match.PathPrefix)
+	}
+}
+
 func TestLoadFile_MalformedJSON(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "agents.json")
@@ -113,6 +149,37 @@ func TestBuildRegistry_MergeProjectLocal(t *testing.T) {
 	}
 	if local.Project != "myproject" {
 		t.Errorf("expected project 'myproject', got %q", local.Project)
+	}
+}
+
+func TestBuildRegistry_ProjectLocalRelativePathPrefix(t *testing.T) {
+	dir := t.TempDir()
+	globalPath := filepath.Join(dir, "global-agents.json")
+	writeAgents(t, globalPath, nil)
+
+	projDir := filepath.Join(dir, "myproject")
+	if err := os.MkdirAll(projDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeAgents(t, filepath.Join(projDir, "agents.json"), []AgentIdentity{
+		{
+			Name:  "reviewer",
+			Match: &MatchRules{PathPrefix: "worktrees/reviewer"},
+		},
+	})
+
+	reg, err := BuildRegistry(globalPath, []ProjectSource{{Name: "myproject", Path: projDir}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	a := reg.ByName("reviewer")
+	if a == nil || a.Match == nil {
+		t.Fatal("expected reviewer with match rules")
+	}
+	want := filepath.Join(projDir, "worktrees/reviewer")
+	if a.Match.PathPrefix != want {
+		t.Fatalf("expected normalized path prefix %q, got %q", want, a.Match.PathPrefix)
 	}
 }
 
@@ -287,6 +354,56 @@ func TestBuildRegistry_LocalLocalDedup(t *testing.T) {
 	a := reg.ByName("shared")
 	if a.Description != "From proj1" {
 		t.Errorf("expected first project to win, got description %q", a.Description)
+	}
+}
+
+func TestAgentIdentity_MatchesSession(t *testing.T) {
+	agent := AgentIdentity{
+		Name: "reviewer",
+		Match: &MatchRules{
+			SessionPattern: "review-*",
+			PathPrefix:     "/code/orca",
+		},
+	}
+
+	if !agent.MatchesSession("review-1", "/code/orca/worktrees/r") {
+		t.Fatal("expected match")
+	}
+	if agent.MatchesSession("worker-1", "/code/orca/worktrees/r") {
+		t.Fatal("expected non-match by session")
+	}
+	if agent.MatchesSession("review-1", "/tmp") {
+		t.Fatal("expected non-match by path")
+	}
+}
+
+func TestResolvePathPrefix(t *testing.T) {
+	if got := ResolvePathPrefix("worktrees/reviewer", "/code/orca"); got != "/code/orca/worktrees/reviewer" {
+		t.Fatalf("unexpected resolved prefix: %q", got)
+	}
+	if got := ResolvePathPrefix("/abs/path", "/code/orca"); got != "/abs/path" {
+		t.Fatalf("unexpected absolute prefix: %q", got)
+	}
+}
+
+func TestAgentIdentity_HasExplicitMatch(t *testing.T) {
+	tests := []struct {
+		name  string
+		agent AgentIdentity
+		want  bool
+	}{
+		{name: "no rules", agent: AgentIdentity{Name: "a"}, want: false},
+		{name: "empty rules", agent: AgentIdentity{Name: "a", Match: &MatchRules{}}, want: false},
+		{name: "session rule", agent: AgentIdentity{Name: "a", Match: &MatchRules{SessionPattern: "x-*"}}, want: true},
+		{name: "path rule", agent: AgentIdentity{Name: "a", Match: &MatchRules{PathPrefix: "/x"}}, want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.agent.HasExplicitMatch(); got != tt.want {
+				t.Fatalf("HasExplicitMatch() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 
