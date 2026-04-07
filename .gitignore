@@ -8,3 +8,6 @@
 
 # Local toolchains
 /.tools/
+
+# Project-local identity file (operator-specific)
+/agents.json
