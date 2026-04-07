@@ -56,7 +56,11 @@ func (v *agentDetailView) update(msg tea.Msg, snap *model.Snapshot, store *event
 		if v.cursor < instCount {
 			inst := agent.Instances[v.cursor]
 			if inst.Orca != nil {
-				return newInstanceDetail(v.agentName, inst.SessionName), actionPush
+				slotName := ""
+				if inst.Orca.AgentName != "" {
+					slotName = inst.Orca.AgentName
+				}
+				return newInstanceDetail(v.agentName, inst.SessionName, slotName), actionPush
 			}
 		}
 	case "g":

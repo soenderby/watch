@@ -29,6 +29,7 @@ type App struct {
 	stack    []view // navigation stack
 	width    int
 	height   int
+	showHelp bool
 	err      error
 }
 
@@ -92,11 +93,23 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// When help is showing, only ? and q are active.
+	if a.showHelp {
+		switch msg.String() {
+		case "?", "esc":
+			a.showHelp = false
+			return a, nil
+		case "q":
+			return a, tea.Quit
+		}
+		return a, nil
+	}
+
 	switch msg.String() {
 	case "q":
 		return a, tea.Quit
 	case "?":
-		// Help overlay — deferred.
+		a.showHelp = !a.showHelp
 		return a, nil
 	case "r":
 		return a, a.doPoll()
@@ -183,7 +196,38 @@ func (a *App) View() string {
 		}
 	}
 
+	if a.showHelp {
+		content = renderHelp(a.width, contentHeight)
+		footer = "? close help  q quit"
+	}
+
 	return header + "\n\n" + content + "\n\n" + footer
+}
+
+func renderHelp(width, height int) string {
+	help := `Keybindings
+
+  j / ↓          Move cursor down
+  k / ↑          Move cursor up
+  enter          Drill into selected item
+  esc            Go back one level
+  g              Jump to tmux session
+  l              View run log (Level 2)
+  r              Force refresh
+  ?              Toggle this help
+  q              Quit
+
+Navigation
+
+  Level 0        Overview — all agents
+  Level 1        Agent detail — instances + events
+  Level 2        Instance detail — runs + events
+
+  enter          pushes a level
+  esc            pops a level
+  g              jumps to tmux (watch stays running)`
+
+	return help
 }
 
 func (a *App) footerForView(v view) string {

@@ -15,21 +15,23 @@ import (
 type instanceDetailView struct {
 	agentName   string
 	sessionName string
+	slotName    string
 	cursor      int
 }
 
-func newInstanceDetail(agentName, sessionName string) *instanceDetailView {
+func newInstanceDetail(agentName, sessionName, slotName string) *instanceDetailView {
 	return &instanceDetailView{
 		agentName:   agentName,
 		sessionName: sessionName,
+		slotName:    slotName,
 	}
 }
 
 func (v *instanceDetailView) title() string {
-	// Extract a short name from the session.
-	agent := v.agentName
-	// Try to show the orca slot name.
-	return agent
+	if v.slotName != "" {
+		return v.slotName
+	}
+	return v.sessionName
 }
 
 func (v *instanceDetailView) update(msg tea.Msg, snap *model.Snapshot, store *events.Store) (view, action) {

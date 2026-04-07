@@ -15,11 +15,7 @@ Implemented:
 - `g` tmux jump and `l` run log pager
 
 Deferred:
-- Help overlay (`?`) is reserved but not yet implemented
 - Queue counters are rendered only when queue data is available (poller currently marks queue unavailable)
-
-Known divergence from the ideal examples below:
-- Level 2 breadcrumb currently repeats the agent name instead of showing the selected slot/session label.
 
 ## Core Concepts
 
@@ -183,7 +179,7 @@ g on any jumpable item    →  switch tmux client to that session
 | `l` | Level 2 | View current run log in pager |
 | `r` | All levels | Force refresh |
 | `q` | All levels | Quit watch |
-| `?` | All levels | Reserved (help overlay not yet implemented) |
+| `?` | All levels | Toggle help overlay |
 
 **Keybinding decisions:**
 - vim-style `j`/`k` navigation. Arrow keys also work.
