@@ -43,7 +43,7 @@ model       identity
 
 ## 1. Agent Identity (`internal/identity`)
 
-This package defines agent identities and the registry that stores them. It is designed for future extraction into lore when that tool is built. Watch consumes identities read-only — it never writes to the registry.
+This package defines agent identities and the registry that stores them. It is designed for future extraction into lore when that tool is built. Runtime snapshot/poller paths consume identities read-only; CLI flows (e.g., identity adoption) can append new definitions to registry files.
 
 ### AgentIdentity
 
@@ -55,6 +55,11 @@ AgentIdentity
   Project        string       optional project association, empty for global agents
   PrimingRef     string       optional path/reference to priming context (AGENTS.md, prompt file)
   Description    string       short human-readable description
+  Match          MatchRules?  optional explicit session matching rules
+
+MatchRules
+  SessionPattern string       optional glob pattern on tmux session name
+  PathPrefix     string       optional path prefix on tmux working directory
 ```
 
 Name is the primary key. It must be unique across the registry (global + project-local combined).
@@ -62,6 +67,8 @@ Name is the primary key. It must be unique across the registry (global + project
 Project is optional. When set, it associates the agent with a registered project. When empty, the agent is global — it can be used in any context.
 
 PrimingRef is a pointer to the agent's priming context, not the context itself. Watch does not interpret priming — it just knows the reference exists. Lore will eventually own priming interpretation.
+
+Match is optional. When present, all non-empty match fields must match the tmux session for the identity to be selected. Explicit matches are preferred. Identities without match rules are treated as fallback candidates.
 
 ### Registry
 
@@ -93,17 +100,20 @@ Global registry (`~/.config/watch/agents.json`):
     {
       "name": "orca-worker",
       "project": "orca",
-      "description": "Batch execution worker"
+      "description": "Batch execution worker",
+      "match": {"session_pattern": "orca-agent-1-*"}
     },
     {
       "name": "librarian",
       "project": "ai-resources",
       "priming_ref": "AGENTS.md",
-      "description": "Knowledge management agent"
+      "description": "Knowledge management agent",
+      "match": {"path_prefix": "/mnt/c/code/ai-resources/worktrees/librarian"}
     },
     {
       "name": "reviewer",
-      "description": "Careful code reviewer, any project"
+      "description": "Careful code reviewer, any project",
+      "match": {"session_pattern": "review-*"}
     }
   ]
 }
@@ -116,13 +126,14 @@ Project-local (`<project-root>/agents.json`):
   "agents": [
     {
       "name": "orca-worker",
-      "description": "Batch execution worker for this project"
+      "description": "Batch execution worker for this project",
+      "match": {"path_prefix": "worktrees/agent-1"}
     }
   ]
 }
 ```
 
-Project-local agents automatically have their project field set to the project they were discovered in. The name must still be globally unique.
+Project-local agents automatically have their project field set to the project they were discovered in. Relative `match.path_prefix` values in project-local files are resolved against the project root. Agent names must still be globally unique.
 
 ### Extraction Plan
 
@@ -316,12 +327,15 @@ The builder reads all inputs on each call. It does not cache.
 
 4. Match tmux sessions to agent identities:
    a. Orca matching: for each tmux session matching the orca naming convention
-      (<prefix>-<index>-<timestamp>), find the registered agent identity
-      associated with that project. Create an Instance with orca enrichment.
+      (<prefix>-<index>-<timestamp>), locate matching artifact data, then
+      select the project identity via explicit rules first and fallback
+      identity only when unambiguous.
    b. Non-orca matching: for each tmux session whose working directory
-      matches a registered project path, find the agent identity associated
-      with that project. Create an Instance without orca enrichment.
-   c. Unmatched sessions are ignored. They do not appear in the snapshot.
+      matches a registered project path, apply project explicit rules,
+      then global explicit rules, then project fallback when unambiguous.
+      Create an Instance without orca enrichment.
+   c. Unmatched or ambiguous sessions are ignored. They do not appear in
+      the snapshot.
 
 5. For each agent identity that has at least one matched instance:
    a. Create Agent with identity + instances.
@@ -337,9 +351,9 @@ The builder reads all inputs on each call. It does not cache.
 
 **Orca matching.** Orca tmux sessions follow the naming convention `<prefix>-<index>-<timestamp>`. The prefix is typically `orca-agent`. The builder checks each registered project for orca artifacts. When a tmux session name matches the convention and the project has artifact data for a matching session ID, the session becomes an orca instance of that project's agent.
 
-**Non-orca matching.** tmux provides a session's working directory. If a session's working directory is within a registered project's path, and that project has a non-orca agent identity registered, the session becomes an instance of that agent. This is the initial matching mechanism for interactive agents.
+**Non-orca matching.** tmux provides a session's working directory. If a session's working directory is within a registered project's path, the builder considers that project's identities. Explicit identity rules (`match.session_pattern`, `match.path_prefix`) are applied first. If no explicit rule matches and exactly one project identity remains, that fallback identity is used. Ambiguous matches are ignored.
 
-**Global agents.** Agents with no project association cannot be automatically matched to tmux sessions in the initial implementation. Automatic matching for global agents is deferred. They can be manually associated in the future.
+**Global agents.** Agents with no project association can match sessions through explicit rules (`match.session_pattern`, `match.path_prefix`). Global identities without explicit rules are not auto-matched.
 
 ### Error Handling
 
@@ -357,6 +371,9 @@ The builder is tolerant. If tmux is unavailable, it returns an empty snapshot. I
 - Queue unavailable: QueueState.Available = false
 - Instance ordering: most recently active first
 - Multiple projects: sessions correctly assigned to their projects' agents
+- Explicit session/path rules: correct identity selected when multiple identities exist
+- Ambiguous identities: session is ignored rather than mis-attributed
+- Global explicit matching: project-less identities can match by rules
 
 ---
 
@@ -553,9 +570,9 @@ Summary.json contains issue IDs only. Title resolution (via `br show`) is deferr
 
 Queue state requires shelling out to `br` per project per poll. Included from the start for 1-2 projects. If polling performance becomes a problem, queue reads can be made less frequent than the main poll interval.
 
-### Global Agent Matching
+### Matching Rule Tuning
 
-Agents with no project association cannot be automatically matched to tmux sessions in the initial implementation. This requires either explicit session registration or a more sophisticated matching mechanism.
+Global and project-local identities can be matched with explicit rules (`match.session_pattern`, `match.path_prefix`). Ambiguous matches are intentionally dropped. If this proves too strict in practice, the matching strategy can be extended with deterministic precedence/scoring while preserving safety.
 
 ### Metrics Integration
 
@@ -567,7 +584,7 @@ Events and snapshots are in-memory only. Watch is live-only. Historical review i
 
 ### Multiple Agent Identities Per Project
 
-The initial implementation supports one agent identity per project for non-orca matching (the first match wins). Multiple distinct agent identities within a single project (e.g., "writer" and "reviewer" in the same repo) requires a richer matching mechanism and is deferred.
+Multiple identities per project are supported through explicit matching rules. If no explicit rule matches and more than one fallback candidate remains, the session is ignored to avoid incorrect attribution.
 
 ---
 

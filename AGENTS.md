@@ -107,6 +107,9 @@ goimports -w .
 
 # All checks (run before committing)
 go vet ./... && go test ./... && go build -o watch ./cmd/watch/
+
+# Preferred local dev sync (checks + global install + smoke test)
+./dev-sync.sh
 ```
 
 ---

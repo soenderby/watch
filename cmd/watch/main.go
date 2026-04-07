@@ -7,7 +7,7 @@ import (
 	"github.com/soenderby/watch/internal/config"
 )
 
-const version = "0.1.0-dev"
+var version = "0.1.0-dev"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -34,8 +34,13 @@ func main() {
 			fmt.Fprintf(os.Stderr, "watch project: %v\n", err)
 			os.Exit(1)
 		}
+	case "identity":
+		if err := runIdentity(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "watch identity: %v\n", err)
+			os.Exit(1)
+		}
 	case "version":
-		fmt.Printf("watch %s\n", version)
+		fmt.Printf("watch %s\n", versionString())
 	case "help", "--help", "-h":
 		printUsage()
 	default:
@@ -52,13 +57,14 @@ Commands:
   list          List agents with active instances
   status        One-line summary of agent state
   project       Manage registered projects
+  identity      Discover and adopt agent identities
   version       Print version
   help          Print this help
 
 When run with no command, enters TUI mode.
 
 Options:
-  --json        Machine-readable output (list, status, project list)`)
+  --json        Machine-readable output (list, status, project list, identity discover)`)
 }
 
 // configPath returns the path to the watch config file.

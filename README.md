@@ -18,6 +18,12 @@ Or build from source:
 go build -o watch ./cmd/watch/
 ```
 
+For local development, run checks and install the latest binary into your Go bin dir:
+
+```bash
+./dev-sync.sh
+```
+
 ## Usage
 
 ```bash
@@ -30,6 +36,10 @@ watch status
 
 # TUI mode
 watch
+
+# Discover unmatched sessions and adopt one as an identity
+watch identity discover
+watch identity adopt <session-name>
 ```
 
 ## Commands
@@ -42,7 +52,9 @@ watch
 | `project add <name> <path>` | Register a project |
 | `project remove <name>` | Unregister a project |
 | `project list [--json]` | List registered projects |
-| `version` | Print version |
+| `identity discover [--json] [--project <name>] [--all]` | Show unmatched tmux sessions that could be agent identities |
+| `identity adopt <session-name> [options]` | Interactively create and save an identity |
+| `version` | Print version (includes commit/clean-dirty metadata when available) |
 
 ## Configuration
 
@@ -52,7 +64,7 @@ Project config lives at `~/.config/watch/config.json` and is managed via `watch 
 
 ### Agent identity registry
 
-Watch only shows sessions that can be matched to a registered agent identity.
+Watch only shows sessions that can be matched to a registered agent identity. You can edit these files manually or use `watch identity adopt`.
 
 Identity definitions are loaded from:
 
@@ -66,8 +78,23 @@ Minimal example:
 ```json
 {
   "agents": [
-    {"name": "orca-worker", "project": "orca", "description": "Batch worker"},
-    {"name": "librarian", "project": "ai-resources", "description": "Knowledge agent"}
+    {
+      "name": "orca-worker-1",
+      "project": "orca",
+      "description": "Batch worker slot 1",
+      "match": {"session_pattern": "orca-agent-1-*"}
+    },
+    {
+      "name": "librarian",
+      "project": "ai-resources",
+      "description": "Knowledge agent",
+      "match": {"path_prefix": "/mnt/c/code/ai-resources/worktrees/librarian"}
+    },
+    {
+      "name": "reviewer",
+      "description": "Global reviewer",
+      "match": {"session_pattern": "review-*"}
+    }
   ]
 }
 ```
@@ -85,8 +112,10 @@ Data flow:
 
 Matching behavior:
 
-- **Orca sessions**: matched by orca naming convention + artifact session ID.
+- **Orca sessions**: matched by orca naming convention + artifact session ID, then assigned to a project identity.
 - **Non-orca sessions**: matched by tmux working directory under a registered project path.
+- **Explicit rules** (`match.session_pattern`, `match.path_prefix`) can disambiguate identities and enable global matching.
+- **Fallback behavior**: if exactly one project identity matches without explicit rules, it is used; ambiguous matches are ignored.
 - **Unmatched sessions**: ignored (not shown).
 
 ## Status
@@ -102,6 +131,4 @@ Implemented:
 
 Deferred / not yet implemented:
 - queue state via `br` integration (currently unavailable)
-- automatic matching for global (project-less) agents
-- richer matching when multiple distinct non-orca identities exist in one project
 - help overlay (`?`) in TUI
