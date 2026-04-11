@@ -3,6 +3,7 @@ package snapshot
 
 import (
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -158,8 +159,16 @@ func Build(in Input) *model.Snapshot {
 		_ = matched
 	}
 
-	// Build Agent objects from collected instances.
-	for _, ai := range agents {
+	// Build Agent objects from collected instances. Iterate the map in
+	// sorted name order so snapshots are deterministic across polls.
+	names := make([]string, 0, len(agents))
+	for name := range agents {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		ai := agents[name]
 		agent := &model.Agent{
 			Name:        ai.identity.Name,
 			Project:     ai.identity.Project,

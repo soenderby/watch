@@ -131,6 +131,71 @@ func TestBuild_UnmatchedIgnored(t *testing.T) {
 	}
 }
 
+func TestBuild_DeterministicAgentOrder(t *testing.T) {
+	reg := registryWith(t, []identity.AgentIdentity{
+		{Name: "zeta", Project: "p"},
+		{Name: "alpha", Project: "p"},
+		{Name: "mike", Project: "p"},
+	})
+
+	// Give each identity exactly one matching session so all three
+	// agents appear in the snapshot.
+	input := Input{
+		Timestamp: t0,
+		Registry:  reg,
+		Projects:  []ProjectConfig{{Name: "p", Path: "/code/p"}},
+		TmuxSessions: []TmuxSession{
+			{Name: "zeta-1", Path: "/code/p", Activity: t0},
+		},
+	}
+
+	// Because there are multiple fallback-eligible identities, no agent
+	// would be attributed. Give them explicit rules instead.
+	reg = registryWith(t, []identity.AgentIdentity{
+		{Name: "zeta", Project: "p", Match: &identity.MatchRules{SessionPattern: "zeta-*"}},
+		{Name: "alpha", Project: "p", Match: &identity.MatchRules{SessionPattern: "alpha-*"}},
+		{Name: "mike", Project: "p", Match: &identity.MatchRules{SessionPattern: "mike-*"}},
+	})
+	input.Registry = reg
+	input.TmuxSessions = []TmuxSession{
+		{Name: "zeta-1", Path: "/code/p", Activity: t0},
+		{Name: "alpha-1", Path: "/code/p", Activity: t0},
+		{Name: "mike-1", Path: "/code/p", Activity: t0},
+	}
+
+	// Build several times; order must be stable.
+	var firstOrder []string
+	for i := 0; i < 10; i++ {
+		snap := Build(input)
+		names := make([]string, 0, len(snap.Agents))
+		for _, a := range snap.Agents {
+			names = append(names, a.Name)
+		}
+		if i == 0 {
+			firstOrder = names
+			continue
+		}
+		if len(names) != len(firstOrder) {
+			t.Fatalf("iteration %d: length mismatch", i)
+		}
+		for j := range names {
+			if names[j] != firstOrder[j] {
+				t.Fatalf("iteration %d: order changed, got %v want %v", i, names, firstOrder)
+			}
+		}
+	}
+
+	want := []string{"alpha", "mike", "zeta"}
+	if len(firstOrder) != len(want) {
+		t.Fatalf("expected %d agents, got %d", len(want), len(firstOrder))
+	}
+	for i := range want {
+		if firstOrder[i] != want[i] {
+			t.Fatalf("expected agents sorted by name %v, got %v", want, firstOrder)
+		}
+	}
+}
+
 func TestBuild_MultipleInstances(t *testing.T) {
 	reg := registryWith(t, []identity.AgentIdentity{
 		{Name: "worker", Project: "orca"},
